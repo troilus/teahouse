@@ -167,6 +167,7 @@ export class Discovery {
 
   /** 资料变更广播（向导/设置保存后）：同网段即时刷新；跨网段靠 presence 的 rev 失配兜底 */
   announceProfile(): void {
+    console.log(`[e2e] 广播 profile，pubKey=${this.profile.pubKey ? '有' : '无'}, rev=${this.profile.profileRev}`)
     const env = makeEnvelope<ProfilePayload>(MSG_TYPES.profile, this.selfId, {
       profile: this.profile
     })

@@ -22,6 +22,22 @@ import {
 interface IdentityFile {
   nodeId: string
   createdAt: number
+  /** X25519 加密私钥（base64），null 表示尚未生成 E2EE 密钥 */
+  encryptedPrivateKey?: string
+  /** 私钥加密 IV（base64） */
+  encryptedKeyIv?: string
+  /** 私钥加密认证标签（base64） */
+  encryptedKeyAuthTag?: string
+  /** 私钥加密 salt（base64） */
+  encryptedKeySalt?: string
+  /** X25519 公钥（base64） */
+  publicKey?: string
+  /** 公钥指纹（hex） */
+  keyFingerprint?: string
+  /** 用户是否选择了"记住密码"（自动解密私钥） */
+  rememberPassword?: boolean
+  /** 加密后的密码哈希（用于验证"记住密码"的正确性） */
+  passwordHash?: string
 }
 
 export interface ConfigFile {

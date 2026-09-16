@@ -40,6 +40,8 @@ import {
   type CaptureFailureReason,
   type DataExportOptions,
   type DataImportResult,
+  type E2eStatusView,
+  type E2ePeerStatusView,
   type ExportFormat,
   type ForwardTarget,
   type GroupPatch,
@@ -154,6 +156,7 @@ import { Messenger } from './net/messenger'
 import { PeerClock } from './net/peer-clock'
 import { makeEnvelope } from './net/codec'
 import { ChatService } from './services/chat'
+import { CryptoService } from './services/crypto'
 import { ImageOcrResultCache } from './services/image-ocr-cache'
 import { ImagePreviewService } from './services/image-preview'
 import { getImageViewerNavigation } from './services/image-navigation'
@@ -271,6 +274,7 @@ if (!gotLock) {
   let stickerRepo: StickerRepo | null = null
   let shareGrantsRepo: ShareGrantsRepo | null = null
   let share: ShareService | null = null
+  let crypto: CryptoService | null = null
   let capturing = false
   let pruneTimer: ReturnType<typeof setInterval> | null = null
   let avatarPruneTimer: ReturnType<typeof setTimeout> | null = null
@@ -281,6 +285,7 @@ if (!gotLock) {
   let nudgeShakeOrigin: [number, number] | null = null
   let nudgeShakeTimers: Array<ReturnType<typeof setTimeout>> = []
   const rangeScanTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  const peersKeyExchanged = new Set<string>() // 已交换过公钥的对端
   let globalScanTimer: ReturnType<typeof setTimeout> | null = null
   let globalScanSeq = 0
   let lastGlobalScanProgressPushAt = 0
@@ -921,6 +926,31 @@ if (!gotLock) {
     void files.offerUpdatePackage(env.from, packagePath)
   }
 
+  function handleKeyExchange(env: Envelope): void {
+    const payload = env.payload as { pubKey: string; fingerprint: string }
+    if (typeof payload.pubKey !== 'string' || typeof payload.fingerprint !== 'string') return
+    console.log(`[e2e] 收到来自 ${env.from} 的公钥交换，指纹=${payload.fingerprint}`)
+    // 无条件存储公钥（不需要本地 crypto 就绪）
+    crypto?.savePeerPubKey(env.from, payload.pubKey, payload.fingerprint)
+    // 同时更新内存中的 registry，使 getPubKey 等查询立即生效
+    const record = registry?.get(env.from)
+    if (record) {
+      record.profile.pubKey = payload.pubKey
+    }
+    // 如果本地 crypto 已就绪，回复自己的公钥
+    if (crypto?.isReady() && messenger) {
+      const myPubKey = crypto.getPublicKeyForBroadcast()
+      const myFingerprint = crypto.getFingerprint()
+      if (myPubKey && myFingerprint) {
+        const kxEnv = makeEnvelope(MSG_TYPES.keyExchange, selfNodeId(), {
+          pubKey: myPubKey,
+          fingerprint: myFingerprint
+        })
+        void messenger.sendReliable(env.from, kxEnv)
+      }
+    }
+  }
+
   /**
    * 共享文件柜控制面（§8.2）：应答对端的 list / get，并把 list-ok / deny 交回本机等待中的请求。
    * 权限、路径、限流全部由 ShareService 判定，这里只做转发与超时收口。
@@ -1246,6 +1276,43 @@ if (!gotLock) {
       messenger.on('incoming', (env: Envelope) => {
         if (env.type === MSG_TYPES.update) handleUpdateRequest(env as Envelope<UpdateReqPayload>)
         else if (env.type === MSG_TYPES.share) handleShareCtl(env as Envelope<SharePayload>)
+        else if (env.type === MSG_TYPES.keyExchange) handleKeyExchange(env)
+      })
+
+      // 初始化端到端加密服务
+      crypto = new CryptoService({
+        selfId: state.nodeId,
+        identityPath: join(app.getPath('userData'), 'data', 'identity.json'),
+        peerStore: {
+          getPubKey: (nodeId: string) => peersRepo?.getPubKey(nodeId) ?? null,
+          hasE2eCapability: (nodeId: string) => peersRepo?.hasE2eCapability(nodeId) ?? false,
+          updatePubKey: (nodeId: string, pubKey: string) => peersRepo?.updatePubKey(nodeId, pubKey)
+        }
+      })
+      // 加密服务就绪后：把公钥注入 Profile 并广播给对端
+      crypto.on('ready', () => {
+        const pubKey = crypto?.getPublicKeyForBroadcast()
+        const fingerprint = crypto?.getFingerprint()
+        console.log(`[e2e] 加密服务就绪，公钥指纹=${fingerprint}`)
+        if (pubKey && state) {
+          state.profile.pubKey = pubKey
+          discovery?.announceProfile()
+        }
+        // 清空已发送记录，重新向所有在线 e2e1 对端发送公钥交换
+        peersKeyExchanged.clear()
+        if (pubKey && fingerprint && messenger) {
+          for (const record of registry.values()) {
+            if (record.online && record.profile.caps.includes(CAPS.e2eEncrypted)) {
+              peersKeyExchanged.add(record.profile.nodeId)
+              console.log(`[e2e] 向 ${record.profile.nodeId} 发送公钥交换`)
+              const kxEnv = makeEnvelope(MSG_TYPES.keyExchange, state.nodeId, {
+                pubKey,
+                fingerprint
+              })
+              void messenger.sendReliable(record.profile.nodeId, kxEnv)
+            }
+          }
+        }
       })
       chat = new ChatService({
         selfId: state.nodeId,
@@ -1264,7 +1331,8 @@ if (!gotLock) {
             files?.applyRecallMessage(row.id)
           },
           applyIncomingRecall: (row) => files?.applyRecallMessage(row.id) ?? false
-        }
+        },
+        crypto
       })
       const onMessage = (msg: MessageView): void => {
         mainWindow?.webContents.send(IpcEvents.msgNew, msg)
@@ -1334,7 +1402,11 @@ if (!gotLock) {
         getSelfIp: currentLocalIpv4,
         peerClock,
         isOnline: (nodeId) => registry?.get(nodeId)?.online === true,
-        resolveDisplayName: resolvePeerDisplayName
+        resolveDisplayName: resolvePeerDisplayName,
+        crypto,
+        getPeerPubKey: (nodeId) => {
+          return peersRepo?.getPubKey(nodeId) ?? null
+        }
       })
       groups.on('message', onMessage)
       groups.on('convs', onConvs)
@@ -1391,6 +1463,27 @@ if (!gotLock) {
         broadcastEvent(IpcEvents.peersUpdated, peerViews())
         mainWindow?.webContents.send(IpcEvents.updateAvailable, currentUpdateAvailability())
         avatars?.ensureAll()
+        // 向新上线且支持 e2e1 的对端发送公钥
+        if (crypto?.isReady() && messenger) {
+          const pubKey = crypto.getPublicKeyForBroadcast()
+          const fingerprint = crypto.getFingerprint()
+          if (pubKey && fingerprint) {
+            for (const record of registry.values()) {
+              if (
+                record.online &&
+                record.profile.caps.includes(CAPS.e2eEncrypted) &&
+                !peersKeyExchanged.has(record.profile.nodeId)
+              ) {
+                peersKeyExchanged.add(record.profile.nodeId)
+                const kxEnv = makeEnvelope(MSG_TYPES.keyExchange, selfNodeId(), {
+                  pubKey,
+                  fingerprint
+                })
+                void messenger.sendReliable(record.profile.nodeId, kxEnv)
+              }
+            }
+          }
+        }
       }, 200)
       // 落库节流 1s：≤1000 行整表 upsert 在事务内毫秒级
       if (!persistTimer) {
@@ -3038,6 +3131,66 @@ if (!gotLock) {
     }
   })
 
+  // 端到端加密 IPC handlers
+  ipcMain.handle(IpcChannels.e2eGetStatus, (): E2eStatusView => {
+    if (!crypto) {
+      return { hasKeys: false, unlocked: false, hasPassword: false, rememberPassword: false, fingerprint: '' }
+    }
+    return crypto.getStatus()
+  })
+
+  ipcMain.handle(IpcChannels.e2eSetPassword, async (_event, password: unknown, remember: unknown): Promise<boolean> => {
+    if (typeof password !== 'string' || password.length === 0 || typeof remember !== 'boolean') return false
+    if (!crypto) return false
+    const success = crypto.setPassword(password, remember)
+    if (success) {
+      mainWindow?.webContents.send(IpcEvents.e2eStatusChanged, crypto.getStatus())
+    }
+    return success
+  })
+
+  ipcMain.handle(IpcChannels.e2eUnlock, async (_event, password: unknown): Promise<boolean> => {
+    if (typeof password !== 'string' || password.length === 0) return false
+    if (!crypto) return false
+    const success = crypto.unlock(password)
+    if (success) {
+      mainWindow?.webContents.send(IpcEvents.e2eStatusChanged, crypto.getStatus())
+    }
+    return success
+  })
+
+  ipcMain.handle(IpcChannels.e2eLock, async (): Promise<void> => {
+    if (!crypto) return
+    crypto.lock()
+    mainWindow?.webContents.send(IpcEvents.e2eStatusChanged, crypto.getStatus())
+  })
+
+  ipcMain.handle(IpcChannels.e2eResetKeys, async (_event, password: unknown): Promise<boolean> => {
+    if (typeof password !== 'string' || password.length === 0) return false
+    if (!crypto) return false
+    const success = crypto.resetKeys(password)
+    if (success) {
+      mainWindow?.webContents.send(IpcEvents.e2eStatusChanged, crypto.getStatus())
+    }
+    return success
+  })
+
+  ipcMain.handle(IpcChannels.e2eGetPeerStatus, (_event, nodeId: unknown): E2ePeerStatusView => {
+    if (typeof nodeId !== 'string' || nodeId.length === 0 || nodeId.length > LIMITS.from) {
+      return { nodeId: '', supported: false, fingerprint: '' }
+    }
+    if (!crypto || !peersRepo) {
+      return { nodeId, supported: false, fingerprint: '' }
+    }
+    const pubKey = peersRepo.getPubKey(nodeId)
+    const hasE2e = peersRepo.hasE2eCapability(nodeId)
+    return {
+      nodeId,
+      supported: hasE2e,
+      fingerprint: pubKey ? crypto.fingerprintFromPubKey(pubKey) : ''
+    }
+  })
+
   app.on('second-instance', () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore()
@@ -3056,6 +3209,7 @@ if (!gotLock) {
       CAPS.groupRoles,
       CAPS.avatarImages,
       CAPS.fileCabinet,
+      CAPS.e2eEncrypted,
       ...updateCaps
     ], app.getPreferredSystemLanguages()[0] || app.getLocale())
     await setLanguage(appState.config.language)

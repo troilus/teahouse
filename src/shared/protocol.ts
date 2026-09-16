@@ -143,6 +143,8 @@ export interface Profile {
   ver: string
   /** 能力声明，供未来扩展探测 */
   caps: string[]
+  /** X25519 公钥（base64），声明 e2e1 时必须携带，用于端到端加密密钥协商 */
+  pubKey?: string
 }
 
 /** caps 能力位（protocol §3 / 决议 #166）：声明本节点能力，供对端探测；入站未知位忽略。 */
@@ -165,7 +167,9 @@ export const CAPS = {
    * 共享文件柜（决议 #271/#275）：能应答 share 报文并收发 purpose:"share-get"|"share-put"。
    * 只表示"支持这套协议"，不代表已开共享——是否可见、可下载、可上传一律由共享方本机当场判定。
    */
-  fileCabinet: 'shr1'
+  fileCabinet: 'shr1',
+  /** 端到端加密：支持 X25519 密钥协商 + AES-256-GCM 加密文本消息与文件元数据。 */
+  e2eEncrypted: 'e2e1'
 } as const
 
 /**
@@ -246,12 +250,27 @@ export const NUDGE_MIN_INTERVAL_MS = TIMINGS.nudgeMinInterval
 export const NUDGE_RATE_WINDOW_MS = TIMINGS.nudgeRateWindow
 export const NUDGE_MAX_PER_WINDOW = TIMINGS.nudgeMaxPerWindow
 
-/** 用户消息载荷（§7.1）。text=单聊；group-text=群聊；recall=撤回指令；nudge=私聊窗口震动；pk=分歧解决 */
+/** 用户消息载荷（§7.1）。text=单聊；group-text=群聊；recall=撤回指令；nudge=私聊窗口震动；pk=分歧解决；encrypted-text=端到端加密文本 */
 export type MsgPayload =
   | {
       kind: 'text'
       text: string
       /** 补发标记：消息保持原 id/ts，落在历史正确位置 */
+      resend?: boolean
+    }
+  | {
+      kind: 'encrypted-text'
+      /** AES-256-GCM 加密后的密文（base64） */
+      ciphertext: string
+      /** 初始化向量（base64） */
+      iv: string
+      /** 认证标签（base64） */
+      authTag: string
+      /** HKDF salt（base64） */
+      salt: string
+      /** 发送方 X25519 公钥（base64），接收方用此公钥 + 自己私钥协商共享密钥 */
+      senderPubKey: string
+      /** 补发标记 */
       resend?: boolean
     }
   | {
@@ -275,6 +294,20 @@ export type MsgPayload =
       /** 补发标记：消息保持原 id/ts，落在历史正确位置 */
       resend?: boolean
       /** 被引用的源消息 ID；接收端在本地群会话内查询后生成展示内容，原字段不随报文传送 */
+      replyTo?: string
+    }
+  | {
+      kind: 'encrypted-group-text'
+      /** AES-256-GCM 加密后的密文（base64） */
+      ciphertext: string
+      iv: string
+      authTag: string
+      salt: string
+      senderPubKey: string
+      groupId: string
+      groupRev: number
+      mentions?: string[]
+      resend?: boolean
       replyTo?: string
     }
   | {
@@ -494,6 +527,14 @@ export interface UpdateReqPayload {
 }
 export type UpdatePayload = UpdateReqPayload
 
+/** 端到端加密公钥交换报文：节点上线时广播自己的 X25519 公钥 */
+export interface KeyExchangePayload {
+  /** 发送方 X25519 公钥（base64 编码） */
+  pubKey: string
+  /** 公钥指纹（SHA-256 前 16 字节，hex），用于快速比对与 UI 展示 */
+  fingerprint: string
+}
+
 /** TCP 控制帧（4 字节大端长度前缀 + UTF-8 JSON；pull-ok 后紧跟 len 字节裸流） */
 export interface PullFrame {
   type: 'pull'
@@ -556,7 +597,8 @@ export const MSG_TYPES = {
   group: 'group',
   avatar: 'avatar',
   update: 'update',
-  share: 'share'
+  share: 'share',
+  keyExchange: 'key-exchange'
 } as const
 
 export function isAvatarHash(value: unknown): value is string {

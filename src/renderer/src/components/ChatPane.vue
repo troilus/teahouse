@@ -288,6 +288,24 @@ const canSendMedia = computed(() =>
 const canSendPk = computed(() =>
   isGroup.value ? canSend.value && onlineGroupRecipientCount.value > 0 : peerOnline.value
 )
+
+// 端到端加密状态（单聊）
+const e2ePeerStatus = ref<{ supported: boolean; fingerprint: string } | null>(null)
+watch(
+  () => peer.value?.nodeId,
+  async (nodeId) => {
+    if (!nodeId || isGroup.value) {
+      e2ePeerStatus.value = null
+      return
+    }
+    try {
+      e2ePeerStatus.value = await window.pantry.e2eGetPeerStatus(nodeId)
+    } catch {
+      e2ePeerStatus.value = null
+    }
+  },
+  { immediate: true }
+)
 const pkDisabledReason = computed(() => tr('PK 只能和在线的人玩'))
 const pkToolTip = computed(() => (canSendPk.value ? 'PK' : pkDisabledReason.value))
 const nudgeRetryRemainingMs = computed(() => Math.max(0, nudgeRetryUntil.value - nudgeNow.value))
@@ -1758,7 +1776,10 @@ async function onDrop(event: DragEvent): Promise<void> {
             :presence="peerOnline ? 'online' : 'offline'"
           />
           <span class="title-text">
-            <span class="title">{{ peerName }}</span>
+            <span class="title-row">
+              <span class="title">{{ peerName }}</span>
+              <span v-if="e2ePeerStatus?.supported" class="e2e-lock" :title="tr('端到端加密')">🔒</span>
+            </span>
             <span class="subtitle">
               <span class="state-word" :class="{ on: peerOnline }">{{
                 peerOnline ? tr('在线') : tr('离线')
@@ -3046,6 +3067,17 @@ async function onDrop(event: DragEvent): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+.title-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.e2e-lock {
+  font-size: 11px;
+  flex-shrink: 0;
+  cursor: help;
 }
 .title-button:hover .title,
 .title-button.active .title {

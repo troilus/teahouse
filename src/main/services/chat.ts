@@ -33,6 +33,7 @@ import {
   type PkRefView,
   type PkResult
 } from '../../shared/pk'
+import type { CryptoService, EncryptedPayload } from './crypto'
 
 // 聊天用例编排（tech-design §3）：发消息 = 写库 → 网络 → 状态回推。
 // 事件出口：'message'（新消息入库）、'status'（发送状态变化）、'convs'（会话列表变化）。
@@ -56,6 +57,8 @@ export interface ChatDeps {
     applyLocalRecall: (row: MsgRow) => void
     applyIncomingRecall: (row: MsgRow) => boolean
   }
+  /** 端到端加密服务（可选；未设置或未就绪时降级为明文） */
+  crypto?: CryptoService
 }
 
 const toConvView = convRowToView
@@ -134,17 +137,52 @@ export class ChatService extends EventEmitter {
     if (!trimmed || Buffer.byteLength(trimmed, 'utf8') > TEXT_TCP_LIMIT) return null
 
     const convId = this.deps.convRepo.ensureSingle(peerId)
-    const env = makeEnvelope<MsgPayload>(MSG_TYPES.msg, this.deps.selfId, {
-      kind: 'text',
-      text: trimmed
-    })
+
+    // 尝试加密：如果 crypto 就绪且对端支持 e2e1，则加密发送
+    let env: Envelope<MsgPayload>
+    let contentForDb = trimmed
+    const cryptoReady = this.deps.crypto?.isReady() ?? false
+    const hasPeerPubKey = this.deps.crypto ? !!(this.deps.crypto as any).deps?.peerStore?.getPubKey(peerId) : false
+    const shouldEncrypt = this.deps.crypto?.shouldEncrypt(peerId) ?? false
+    console.log(`[e2e] sendText to ${peerId}: cryptoReady=${cryptoReady}, shouldEncrypt=${shouldEncrypt}`)
+
+    if (shouldEncrypt) {
+      const encrypted = this.deps.crypto!.encryptText(trimmed, peerId)
+      if (encrypted) {
+        console.log(`[e2e] 加密成功，密文长度=${encrypted.ciphertext.length}`)
+        env = makeEnvelope<MsgPayload>(MSG_TYPES.msg, this.deps.selfId, {
+          kind: 'encrypted-text',
+          ciphertext: encrypted.ciphertext,
+          iv: encrypted.iv,
+          authTag: encrypted.authTag,
+          salt: encrypted.salt,
+          senderPubKey: encrypted.senderPubKey
+        })
+        // 本地存储明文（用于显示和搜索）
+        contentForDb = trimmed
+      } else {
+        console.warn(`[e2e] encryptText 返回 null，降级为明文`)
+        // 加密失败，降级为明文
+        env = makeEnvelope<MsgPayload>(MSG_TYPES.msg, this.deps.selfId, {
+          kind: 'text',
+          text: trimmed
+        })
+      }
+    } else {
+      console.log(`[e2e] 不加密（shouldEncrypt=false），原因: cryptoReady=${cryptoReady}`)
+      env = makeEnvelope<MsgPayload>(MSG_TYPES.msg, this.deps.selfId, {
+        kind: 'text',
+        text: trimmed
+      })
+    }
+
     this.deps.msgRepo.insert({
       id: env.id,
       convId,
       senderId: this.deps.selfId,
       isMine: true,
       kind: 'text',
-      content: trimmed,
+      content: contentForDb,
       ts: env.ts,
       status: 'sending'
     })
@@ -301,8 +339,12 @@ export class ChatService extends EventEmitter {
       this.onIncomingPk(env as Envelope<MsgPayload>)
       return
     }
-    if (payload.kind === 'group-text') {
+    if (payload.kind === 'group-text' || payload.kind === 'encrypted-group-text') {
       this.deferPendingRecall(env.id)
+      return
+    }
+    if (payload.kind === 'encrypted-text') {
+      this.onIncomingEncryptedText(env as Envelope<MsgPayload>)
       return
     }
     if (payload.kind !== 'text') return
@@ -321,6 +363,50 @@ export class ChatService extends EventEmitter {
       status: 'sent'
     })
     if (!inserted) return // 持久化去重之外的最后一道闸（messages 主键幂等）
+    this.deps.convRepo.bump(convId, ts)
+    this.deps.convRepo.incUnread(convId)
+    const row = this.deps.msgRepo.get(env.id)
+    if (row) this.emit('message', toMsgView(row))
+    this.emitConvs()
+    this.deferPendingRecall(env.id)
+  }
+
+  private onIncomingEncryptedText(env: Envelope<MsgPayload>): void {
+    const payload = env.payload as MsgPayload
+    if (payload.kind !== 'encrypted-text') return
+    console.log(`[e2e] 收到来自 ${env.from} 的加密消息`)
+
+    // 尝试解密
+    let plaintext: string | null = null
+    if (this.deps.crypto?.isReady()) {
+      const encryptedPayload: EncryptedPayload = {
+        ciphertext: payload.ciphertext,
+        iv: payload.iv,
+        authTag: payload.authTag,
+        salt: payload.salt,
+        senderPubKey: payload.senderPubKey
+      }
+      plaintext = this.deps.crypto.decryptText(encryptedPayload)
+      console.log(`[e2e] 解密${plaintext ? '成功' : '失败'}，明文长度=${plaintext?.length ?? 0}`)
+    } else {
+      console.warn(`[e2e] 本地 crypto 未就绪，无法解密`)
+    }
+
+    const convId = this.deps.convRepo.ensureSingle(env.from)
+    if (!payload.resend) this.deps.peerClock?.observe(env.from, env.ts, Date.now())
+    const ts = this.deps.peerClock?.correct(env.from, env.ts) ?? env.ts
+
+    const inserted = this.deps.msgRepo.insert({
+      id: env.id,
+      convId,
+      senderId: env.from,
+      isMine: false,
+      kind: 'text',
+      content: plaintext ?? '[无法解密的消息]',
+      ts,
+      status: 'sent'
+    })
+    if (!inserted) return
     this.deps.convRepo.bump(convId, ts)
     this.deps.convRepo.incUnread(convId)
     const row = this.deps.msgRepo.get(env.id)

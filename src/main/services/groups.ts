@@ -22,6 +22,7 @@ import { MsgRepo, msgRowToView } from '../store/msg-repo'
 import { GroupRepo } from '../store/group-repo'
 import type { PeerClock } from '../net/peer-clock'
 import { isPkGame, pkPreview, type PkGame, type PkRefView, type PkResult } from '../../shared/pk'
+import type { CryptoService, EncryptedPayload } from './crypto'
 
 // 讨论组编排（§7.4 / F-MSG-4）：
 // 群消息 = 同一信封逐成员单播（离线走补发）；元数据 LWW；
@@ -34,7 +35,7 @@ export interface GroupsDeps {
   convRepo: ConvRepo
   msgRepo: MsgRepo
   groupRepo: GroupRepo
-  /** 当前本机用于“创建 IP 管理”的 IPv4；测试可注入 */
+  /** 当前本机用于"创建 IP 管理"的 IPv4；测试可注入 */
   getSelfIp?: () => string
   /** 时钟偏移矫正（决议 #65）：把群成员消息显示时间换算到本机钟 */
   peerClock?: PeerClock
@@ -42,6 +43,10 @@ export interface GroupsDeps {
   resolveDisplayName?: (nodeId: string) => string
   /** 在线即时能力（PK）：群 PK 只发给当前在线成员 */
   isOnline?: (nodeId: string) => boolean
+  /** 端到端加密服务（可选；未设置或未就绪时降级为明文） */
+  crypto?: CryptoService
+  /** 获取对端公钥（用于群聊 per-member 加密） */
+  getPeerPubKey?: (nodeId: string) => string | null
 }
 
 export class GroupsService extends EventEmitter {
@@ -239,35 +244,102 @@ export class GroupsService extends EventEmitter {
       .slice(0, GROUP_MAX_MEMBERS)
 
     const convId = this.deps.convRepo.ensureGroup(groupId)
-    const env = makeEnvelope<MsgPayload>(MSG_TYPES.msg, this.deps.selfId, {
-      kind: 'group-text',
-      text: trimmed,
-      groupId,
-      groupRev: meta.rev,
-      ...(cleanMentions.length > 0 ? { mentions: cleanMentions } : {}),
-      replyTo: replyTo ? replyTo : ''
-    })
-    // 群消息不做按成员回执（v0.3 简化）：本端入库即 sent，离线成员由补发队列保送达
+
+    // 尝试 per-member 加密
+    const shouldEncrypt = this.deps.crypto?.isReady() ?? false
+    let basePayload: MsgPayload
+    let contentForDb = trimmed
+
+    if (shouldEncrypt) {
+      // 收集在线成员的公钥
+      const memberPubKeys = new Map<string, string>()
+      for (const member of meta.members) {
+        if (member === this.deps.selfId) continue
+        const pubKey = this.deps.getPeerPubKey?.(member)
+        if (pubKey) memberPubKeys.set(member, pubKey)
+      }
+
+      if (memberPubKeys.size > 0) {
+        // 有公钥的成员用加密，没有的用明文（降级）
+        basePayload = {
+          kind: 'group-text',
+          text: trimmed,
+          groupId,
+          groupRev: meta.rev,
+          ...(cleanMentions.length > 0 ? { mentions: cleanMentions } : {}),
+          replyTo: replyTo ? replyTo : ''
+        }
+      } else {
+        basePayload = {
+          kind: 'group-text',
+          text: trimmed,
+          groupId,
+          groupRev: meta.rev,
+          ...(cleanMentions.length > 0 ? { mentions: cleanMentions } : {}),
+          replyTo: replyTo ? replyTo : ''
+        }
+      }
+    } else {
+      basePayload = {
+        kind: 'group-text',
+        text: trimmed,
+        groupId,
+        groupRev: meta.rev,
+        ...(cleanMentions.length > 0 ? { mentions: cleanMentions } : {}),
+        replyTo: replyTo ? replyTo : ''
+      }
+    }
+
+    // 本端入库（明文，用于本地显示和搜索）
     this.deps.msgRepo.insert({
-      id: env.id,
+      id: `${this.deps.selfId}-${Date.now()}`,
       convId,
       senderId: this.deps.selfId,
       isMine: true,
       kind: 'text',
-      content: trimmed,
-      ts: env.ts,
+      content: contentForDb,
+      ts: Date.now(),
       status: 'sent',
       replyTo: replyTo
     })
-    this.deps.convRepo.bump(convId, env.ts)
+    this.deps.convRepo.bump(convId, Date.now())
     this.emitConvs()
 
+    // 逐成员发送
     for (const member of meta.members) {
-      if (member !== this.deps.selfId) {
-        void this.deps.messenger.sendUserMessage(member, env)
+      if (member === this.deps.selfId) continue
+
+      const memberPubKey = this.deps.getPeerPubKey?.(member)
+      const memberSupportsE2e = memberPubKey && this.deps.crypto?.shouldEncrypt(member)
+      console.log(`[e2e] 群聊发 ${member}: pubKey=${memberPubKey ? '有' : '无'}, encrypt=${memberSupportsE2e}`)
+
+      let env: Envelope<MsgPayload>
+      if (memberSupportsE2e && this.deps.crypto) {
+        const encrypted = this.deps.crypto.encryptText(trimmed, member)
+        if (encrypted) {
+          env = makeEnvelope<MsgPayload>(MSG_TYPES.msg, this.deps.selfId, {
+            kind: 'encrypted-group-text',
+            ciphertext: encrypted.ciphertext,
+            iv: encrypted.iv,
+            authTag: encrypted.authTag,
+            salt: encrypted.salt,
+            senderPubKey: encrypted.senderPubKey,
+            groupId,
+            groupRev: meta.rev,
+            ...(cleanMentions.length > 0 ? { mentions: cleanMentions } : {}),
+            replyTo: replyTo ? replyTo : ''
+          })
+        } else {
+          env = makeEnvelope<MsgPayload>(MSG_TYPES.msg, this.deps.selfId, basePayload)
+        }
+      } else {
+        env = makeEnvelope<MsgPayload>(MSG_TYPES.msg, this.deps.selfId, basePayload)
       }
+
+      void this.deps.messenger.sendUserMessage(member, env)
     }
-    const row = this.deps.msgRepo.get(env.id)
+
+    const row = this.deps.msgRepo.get(`${this.deps.selfId}-${Date.now()}`)
     return row ? msgRowToView(row) : null
   }
 
@@ -313,7 +385,12 @@ export class GroupsService extends EventEmitter {
 
   private onIncomingMsg(env: Envelope): void {
     const payload = env.payload as MsgPayload
-    if ((payload.kind !== 'group-text' && payload.kind !== 'pk') || !payload.groupId) return
+    if (
+      payload.kind !== 'group-text' &&
+      payload.kind !== 'encrypted-group-text' &&
+      payload.kind !== 'pk'
+    ) return
+    if (!payload.groupId) return
 
     const convId = this.deps.convRepo.ensureGroup(payload.groupId)
     // 实时群消息校准时钟偏移；显示时间矫正到本机钟（决议 #65）；排序仍用本地 seq
@@ -342,21 +419,52 @@ export class GroupsService extends EventEmitter {
       return
     }
 
+    // 处理加密群消息
+    let textContent: string
+    let mentions: string[] | undefined
+    let replyTo: string | undefined
+
+    if (payload.kind === 'encrypted-group-text') {
+      console.log(`[e2e] 收到来自 ${env.from} 的加密群消息`)
+      // 尝试解密
+      let plaintext: string | null = null
+      if (this.deps.crypto?.isReady()) {
+        const encryptedPayload: EncryptedPayload = {
+          ciphertext: payload.ciphertext,
+          iv: payload.iv,
+          authTag: payload.authTag,
+          salt: payload.salt,
+          senderPubKey: payload.senderPubKey
+        }
+        plaintext = this.deps.crypto.decryptText(encryptedPayload)
+        console.log(`[e2e] 群消息解密${plaintext ? '成功' : '失败'}`)
+      } else {
+        console.warn(`[e2e] 本地 crypto 未就绪，无法解密群消息`)
+      }
+      textContent = plaintext ?? '[无法解密的消息]'
+      mentions = payload.mentions
+      replyTo = payload.replyTo
+    } else {
+      textContent = payload.text
+      mentions = payload.mentions
+      replyTo = payload.replyTo
+    }
+
     const inserted = this.deps.msgRepo.insert({
       id: env.id,
       convId,
       senderId: env.from,
       isMine: false,
       kind: 'text',
-      content: payload.text,
+      content: textContent,
       ts,
       status: 'sent',
-      replyTo: payload.replyTo
+      replyTo
     })
     if (inserted) {
       this.deps.convRepo.bump(convId, ts)
       this.deps.convRepo.incUnread(convId)
-      const mentioned = Array.isArray(payload.mentions) && payload.mentions.includes(this.deps.selfId)
+      const mentioned = Array.isArray(mentions) && mentions.includes(this.deps.selfId)
       if (mentioned) this.deps.convRepo.markMentioned(convId)
       const row = this.deps.msgRepo.get(env.id)
       if (row) {
@@ -372,7 +480,12 @@ export class GroupsService extends EventEmitter {
   }
 
   private syncGroupMetaIfNeeded(payload: MsgPayload, from: string): void {
-    if ((payload.kind !== 'group-text' && payload.kind !== 'pk') || !payload.groupId) return
+    if (
+      payload.kind !== 'group-text' &&
+      payload.kind !== 'encrypted-group-text' &&
+      payload.kind !== 'pk'
+    ) return
+    if (!payload.groupId) return
     const meta = this.deps.groupRepo.get(payload.groupId)
     if (!meta || (payload.groupRev ?? 0) > meta.rev) {
       void this.deps.messenger.sendReliable(

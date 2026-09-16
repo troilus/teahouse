@@ -114,7 +114,19 @@ export const IpcChannels = {
   /** 局域网自更新：查询当前可用更新源（决议 #166） */
   updateCheck: 'update:check',
   /** 局域网自更新：向当前最佳更新源请求安装包（决议 #170） */
-  updateRequest: 'update:request'
+  updateRequest: 'update:request',
+  /** 端到端加密：获取加密状态 */
+  e2eGetStatus: 'e2e:get-status',
+  /** 端到端加密：设置用户密码（首次启用或修改） */
+  e2eSetPassword: 'e2e:set-password',
+  /** 端到端加密：用密码解锁私钥 */
+  e2eUnlock: 'e2e:unlock',
+  /** 端到端加密：锁定（清除内存中的私钥） */
+  e2eLock: 'e2e:lock',
+  /** 端到端加密：生成新的密钥对 */
+  e2eResetKeys: 'e2e:reset-keys',
+  /** 端到端加密：获取对端加密状态 */
+  e2eGetPeerStatus: 'e2e:get-peer-status'
 } as const
 
 /** main → renderer 的事件推送 */
@@ -150,7 +162,9 @@ export const IpcEvents = {
   /** 局域网自更新：可用更新源变化（决议 #166） */
   updateAvailable: 'update:available',
   /** 文件柜窗口已开着时再次请求打开某位同事的柜子（决议 #283） */
-  cabinetFocusPeer: 'cabinet:focus-peer'
+  cabinetFocusPeer: 'cabinet:focus-peer',
+  /** 端到端加密状态变化 */
+  e2eStatusChanged: 'e2e:status-changed'
 } as const
 
 /** 全局快捷键出厂默认（决议 #57）：设置页"恢复默认"与主进程默认值的唯一来源 */
@@ -743,6 +757,28 @@ export interface CaptureFailureNotice {
   message: string
 }
 
+export interface E2eStatusView {
+  /** 是否已生成密钥对 */
+  hasKeys: boolean
+  /** 私钥是否已解锁（解密到内存） */
+  unlocked: boolean
+  /** 是否设置了用户密码 */
+  hasPassword: boolean
+  /** 是否记住密码（重启后自动解锁） */
+  rememberPassword: boolean
+  /** 公钥指纹（用于显示和验证） */
+  fingerprint: string
+}
+
+export interface E2ePeerStatusView {
+  /** 对端节点 ID */
+  nodeId: string
+  /** 对端是否支持 e2e */
+  supported: boolean
+  /** 对端公钥指纹（如果已交换） */
+  fingerprint: string
+}
+
 /** preload 经 contextBridge 暴露到 window.pantry 的 API 形状 */
 export interface PantryApi {
   getAppInfo(): Promise<AppInfo>
@@ -975,4 +1011,18 @@ export interface PantryApi {
   /** Linux JS 拖拽（决议 #52）：按住拖拽带时主进程跟随光标移窗 */
   beginWindowDrag(): Promise<void>
   endWindowDrag(): Promise<void>
+  /** 端到端加密：获取当前加密状态 */
+  e2eGetStatus(): Promise<E2eStatusView>
+  /** 端到端加密：设置用户密码（首次启用或修改） */
+  e2eSetPassword(password: string, remember: boolean): Promise<boolean>
+  /** 端到端加密：用密码解锁私钥 */
+  e2eUnlock(password: string): Promise<boolean>
+  /** 端到端加密：锁定（清除内存中的私钥） */
+  e2eLock(): Promise<void>
+  /** 端到端加密：生成新的密钥对（会清除旧密钥） */
+  e2eResetKeys(password: string): Promise<boolean>
+  /** 端到端加密：获取对端加密状态 */
+  e2eGetPeerStatus(nodeId: string): Promise<E2ePeerStatusView>
+  /** 端到端加密状态变化监听 */
+  onE2eStatusChanged(listener: (status: E2eStatusView) => void): () => void
 }

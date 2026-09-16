@@ -25,6 +25,7 @@ interface PeerRow {
   ver: string
   first_seen: number
   last_seen: number
+  pub_key: string
 }
 
 function toPlatform(value: string): Platform {
@@ -36,16 +37,19 @@ export class PeersRepo {
   private readonly selectAllStmt: DatabaseT.Statement
   private readonly remarkStmt: DatabaseT.Statement
   private readonly remarksAllStmt: DatabaseT.Statement
+  private readonly getPubKeyStmt: DatabaseT.Statement
+  private readonly hasE2eStmt: DatabaseT.Statement
+  private readonly updatePubKeyStmt: DatabaseT.Statement
   private readonly upsertManyTx: (records: PeerRecord[]) => void
 
   constructor(db: DatabaseT.Database) {
     this.upsertStmt = db.prepare(`
       INSERT INTO peers (
         node_id, nick, company, dept, team, avatar, avatar_hash, host, platform,
-        ip, udp_port, tcp_port, profile_rev, caps, ver, first_seen, last_seen
+        ip, udp_port, tcp_port, profile_rev, caps, ver, pub_key, first_seen, last_seen
       ) VALUES (
         @nodeId, @nick, @company, @dept, @team, @avatar, @avatarHash, @host, @platform,
-        @ip, @udpPort, @tcpPort, @profileRev, @caps, @ver, @now, @lastSeen
+        @ip, @udpPort, @tcpPort, @profileRev, @caps, @ver, @pubKey, @now, @lastSeen
       )
       ON CONFLICT(node_id) DO UPDATE SET
         nick = excluded.nick, company = excluded.company, dept = excluded.dept,
@@ -53,7 +57,9 @@ export class PeersRepo {
         host = excluded.host,
         platform = excluded.platform, ip = excluded.ip, udp_port = excluded.udp_port,
         tcp_port = excluded.tcp_port, profile_rev = excluded.profile_rev,
-        caps = excluded.caps, ver = excluded.ver, last_seen = excluded.last_seen
+        caps = excluded.caps, ver = excluded.ver,
+        pub_key = CASE WHEN excluded.pub_key != '' THEN excluded.pub_key ELSE pub_key END,
+        last_seen = excluded.last_seen
     `) // remark 与 first_seen 不被覆盖：备注是本地资产，首次见面时间只写一次
 
     this.selectAllStmt = db.prepare('SELECT * FROM peers ORDER BY last_seen DESC')
@@ -66,6 +72,10 @@ export class PeersRepo {
     this.remarksAllStmt = db.prepare(
       "SELECT node_id, remark FROM peers WHERE remark IS NOT NULL AND remark != ''"
     )
+
+    this.getPubKeyStmt = db.prepare('SELECT pub_key FROM peers WHERE node_id = ?')
+    this.hasE2eStmt = db.prepare('SELECT caps FROM peers WHERE node_id = ?')
+    this.updatePubKeyStmt = db.prepare('UPDATE peers SET pub_key = ? WHERE node_id = ?')
 
     this.upsertManyTx = db.transaction((records: PeerRecord[]) => {
       for (const record of records) this.upsertOne(record)
@@ -90,6 +100,7 @@ export class PeersRepo {
       profileRev: p.profileRev,
       caps: JSON.stringify(p.caps),
       ver: p.ver,
+      pubKey: p.pubKey ?? '',
       now: Date.now(),
       lastSeen: record.lastSeen
     })
@@ -106,6 +117,29 @@ export class PeersRepo {
   loadRemarks(): Map<string, string> {
     const rows = this.remarksAllStmt.all() as Array<{ node_id: string; remark: string }>
     return new Map(rows.map((r) => [r.node_id, r.remark]))
+  }
+
+  /** 获取指定节点的公钥 */
+  getPubKey(nodeId: string): string | null {
+    const row = this.getPubKeyStmt.get(nodeId) as { pub_key: string } | undefined
+    return row?.pub_key || null
+  }
+
+  /** 检查节点是否声明 e2e1 能力 */
+  hasE2eCapability(nodeId: string): boolean {
+    const row = this.hasE2eStmt.get(nodeId) as { caps: string } | undefined
+    if (!row) return false
+    try {
+      const caps: unknown = JSON.parse(row.caps)
+      return Array.isArray(caps) && caps.includes('e2e1')
+    } catch {
+      return false
+    }
+  }
+
+  /** 更新指定节点的公钥（用于密钥交换） */
+  updatePubKey(nodeId: string, pubKey: string): void {
+    this.updatePubKeyStmt.run(pubKey, nodeId)
   }
 
   /** 全量载入为离线记录（在线态由网络层实时判定，不持久化） */
@@ -132,7 +166,8 @@ export class PeersRepo {
         platform: toPlatform(row.platform),
         tcpPort: row.tcp_port,
         ver: row.ver,
-        caps
+        caps,
+        pubKey: row.pub_key || undefined
       }
       return {
         profile,

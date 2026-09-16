@@ -25,6 +25,7 @@ import {
   type FileCtlOffer,
   type FileCtlPayload,
   type GroupPayload,
+  type KeyExchangePayload,
   type MsgPayload,
   type PeersPayload,
   type PresencePayload,
@@ -103,6 +104,13 @@ export function validateProfile(p: unknown): p is Profile {
   if (!isStrAllowEmpty(p.ver, LIMITS.ver)) return false
   if (!Array.isArray(p.caps) || p.caps.length > LIMITS.caps) return false
   if (!p.caps.every((c) => typeof c === 'string' && c.length <= LIMITS.capItem)) return false
+  // pubKey：可选字段，base64 编码的 X25519 公钥
+  const pubKey = (p as { pubKey?: unknown }).pubKey
+  if (pubKey !== undefined) {
+    if (typeof pubKey !== 'string' || pubKey.length === 0 || pubKey.length > 100) return false
+    // 简单校验 base64 格式（44 字符的 base64url 编码）
+    if (!/^[A-Za-z0-9_-]{43,44}$/.test(pubKey)) return false
+  }
   return true
 }
 
@@ -124,6 +132,8 @@ function validatePayload(type: string, payload: unknown, textLimit = TEXT_UDP_LI
       if (
         m.kind !== 'text' &&
         m.kind !== 'group-text' &&
+        m.kind !== 'encrypted-text' &&
+        m.kind !== 'encrypted-group-text' &&
         m.kind !== 'recall' &&
         m.kind !== 'nudge' &&
         m.kind !== 'pk'
@@ -153,6 +163,40 @@ function validatePayload(type: string, payload: unknown, textLimit = TEXT_UDP_LI
         } else if (m.groupRev !== undefined) {
           return false
         }
+        return true
+      }
+      // 加密消息校验
+      if (m.kind === 'encrypted-text') {
+        const ct = (m as { ciphertext?: unknown }).ciphertext
+        const iv = (m as { iv?: unknown }).iv
+        const at = (m as { authTag?: unknown }).authTag
+        const salt = (m as { salt?: unknown }).salt
+        const spk = (m as { senderPubKey?: unknown }).senderPubKey
+        if (typeof ct !== 'string' || ct.length === 0) return false
+        if (typeof iv !== 'string' || iv.length === 0) return false
+        if (typeof at !== 'string' || at.length === 0) return false
+        if (typeof salt !== 'string' || salt.length === 0) return false
+        if (typeof spk !== 'string' || spk.length === 0) return false
+        return true
+      }
+      if (m.kind === 'encrypted-group-text') {
+        const ct = (m as { ciphertext?: unknown }).ciphertext
+        const iv = (m as { iv?: unknown }).iv
+        const at = (m as { authTag?: unknown }).authTag
+        const salt = (m as { salt?: unknown }).salt
+        const spk = (m as { senderPubKey?: unknown }).senderPubKey
+        if (typeof ct !== 'string' || ct.length === 0) return false
+        if (typeof iv !== 'string' || iv.length === 0) return false
+        if (typeof at !== 'string' || at.length === 0) return false
+        if (typeof salt !== 'string' || salt.length === 0) return false
+        if (typeof spk !== 'string' || spk.length === 0) return false
+        if (!isStr(m.groupId, LIMITS.id)) return false
+        if (!isInt(m.groupRev) || m.groupRev! < 0) return false
+        if (m.mentions !== undefined) {
+          if (!Array.isArray(m.mentions) || m.mentions.length > GROUP_MAX_MEMBERS) return false
+          if (!m.mentions.every((id) => isStr(id, LIMITS.from))) return false
+        }
+        if (m.replyTo !== undefined && (typeof m.replyTo !== 'string' || m.replyTo.length > LIMITS.id)) return false
         return true
       }
       const text = (m as { text?: unknown }).text
@@ -437,6 +481,17 @@ function validatePayload(type: string, payload: unknown, textLimit = TEXT_UDP_LI
       if (u.op !== 'req') return false
       if (u.arch !== undefined && !isRuntimeArch(u.arch)) return false
       return u.platform === 'win' || u.platform === 'mac' || u.platform === 'linux'
+    }
+    case MSG_TYPES.keyExchange: {
+      if (!isRecord(payload)) return false
+      const kx = payload as Partial<KeyExchangePayload>
+      // pubKey：base64url 编码的 X25519 公钥（44 字符）
+      if (typeof kx.pubKey !== 'string' || kx.pubKey.length === 0) return false
+      if (!/^[A-Za-z0-9_-]{43,44}$/.test(kx.pubKey)) return false
+      // fingerprint：十六进制字符串（sha256 前 8 字节）
+      if (typeof kx.fingerprint !== 'string' || kx.fingerprint.length === 0) return false
+      if (!/^[a-f0-9]{16}$/.test(kx.fingerprint)) return false
+      return true
     }
     case MSG_TYPES.exit:
       return isRecord(payload)

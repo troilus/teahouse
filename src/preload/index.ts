@@ -295,7 +295,15 @@ const api: PantryApi = {
   beginWindowDrag: (): Promise<void> => ipcRenderer.invoke(IpcChannels.winBeginDrag),
   endWindowDrag: (): Promise<void> => ipcRenderer.invoke(IpcChannels.winEndDrag),
   closeWindow: (): Promise<void> => ipcRenderer.invoke(IpcChannels.winClose),
-  hideMainWindow: (): Promise<void> => ipcRenderer.invoke(IpcChannels.winHideMain)
+  hideMainWindow: (): Promise<void> => ipcRenderer.invoke(IpcChannels.winHideMain),
+  e2eGetStatus: () => ipcRenderer.invoke(IpcChannels.e2eGetStatus),
+  e2eSetPassword: (password: string, remember: boolean) =>
+    ipcRenderer.invoke(IpcChannels.e2eSetPassword, password, remember),
+  e2eUnlock: (password: string) => ipcRenderer.invoke(IpcChannels.e2eUnlock, password),
+  e2eLock: () => ipcRenderer.invoke(IpcChannels.e2eLock),
+  e2eResetKeys: (password: string) => ipcRenderer.invoke(IpcChannels.e2eResetKeys, password),
+  e2eGetPeerStatus: (nodeId: string) => ipcRenderer.invoke(IpcChannels.e2eGetPeerStatus, nodeId),
+  onE2eStatusChanged: (listener) => subscribe<import('../shared/ipc').E2eStatusView>(IpcEvents.e2eStatusChanged, listener)
 }
 
 contextBridge.exposeInMainWorld('pantry', api)

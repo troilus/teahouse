@@ -205,6 +205,11 @@ export const MIGRATIONS: ReadonlyArray<string> = [
   `
   ALTER TABLE groups ADD COLUMN description TEXT NOT NULL DEFAULT '';
   ALTER TABLE groups ADD COLUMN announce TEXT NOT NULL DEFAULT '';
+  `,
+
+  // v17：端到端加密公钥存储（X25519 密钥协商）
+  `
+  ALTER TABLE peers ADD COLUMN pub_key TEXT NOT NULL DEFAULT '';
   `
 ]
 

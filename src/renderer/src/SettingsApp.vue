@@ -61,6 +61,7 @@ type Section =
   | 'notify'
   | 'storage'
   | 'network'
+  | 'security'
   | 'shortcuts'
   | 'about'
 
@@ -94,6 +95,12 @@ const sections = computed<Array<{ id: Section; icon: string; label: string; summ
     icon: 'settings-network',
     label: tr('网络'),
     summary: tr('手动节点、网段扫描与端口。')
+  },
+  {
+    id: 'security',
+    icon: 'settings-about',
+    label: tr('安全'),
+    summary: tr('端到端加密：保护消息和文件元数据的隐私。')
   },
   {
     id: 'shortcuts',
@@ -229,8 +236,20 @@ const pendingPortLabel = computed(() => (pendingPortEdit.value === 'udp' ? 'UDP'
 const captureShortcut = ref('')
 const showHideShortcut = ref('')
 let stopSettings: (() => void) | null = null
+let stopE2eStatus: (() => void) | null = null
 const selectedAvatarEmoji = computed(() => avatarEmojiIndex(avatar.value))
 const selectedAvatarColor = computed(() => avatarColorIndex(avatar.value, nick.value || tr('茶')))
+
+// 端到端加密表单
+const e2eStatus = ref<{ hasKeys: boolean; unlocked: boolean; hasPassword: boolean; rememberPassword: boolean; fingerprint: string } | null>(null)
+const e2ePassword = ref('')
+const e2ePasswordConfirm = ref('')
+const e2eRemember = ref(false)
+const e2eUnlockPassword = ref('')
+const e2eBusy = ref(false)
+const e2eError = ref('')
+const e2eSuccess = ref('')
+const e2eMode = ref<'idle' | 'setup' | 'unlock'>('idle')
 const avatarSummary = computed(() => {
   if (avatarHash.value) return tr('自定义头像')
   const colorName = tr(AVATAR_COLORS[selectedAvatarColor.value]?.name ?? '')
@@ -272,16 +291,21 @@ onMounted(async () => {
   info.value = await window.pantry.getAppInfo()
   applyPerformanceProfile(info.value)
   await reload()
+  await loadE2eStatus()
   stopSettings = window.pantry.onSettingsUpdated((s) => {
     if (settings.value && settings.value.language !== s.language) {
       settings.value = s
       applyAppearance(s)
     } else syncForm(s)
   })
+  stopE2eStatus = window.pantry.onE2eStatusChanged((s) => {
+    e2eStatus.value = s
+  })
 })
 
 onUnmounted(() => {
   stopSettings?.()
+  stopE2eStatus?.()
   if (toastTimer) clearTimeout(toastTimer)
 })
 
@@ -345,6 +369,96 @@ async function saveApp(patch: AppSettingsPatch, tip = tr('已保存')): Promise<
   const next = await window.pantry.saveAppSettings(patch)
   syncForm(next)
   flashSaved(tip)
+}
+
+// ---- 端到端加密操作 ----
+
+async function loadE2eStatus(): Promise<void> {
+  e2eStatus.value = await window.pantry.e2eGetStatus()
+  if (!e2eStatus.value?.hasKeys) {
+    e2eMode.value = 'setup'
+  } else if (!e2eStatus.value.unlocked) {
+    e2eMode.value = 'unlock'
+  } else {
+    e2eMode.value = 'idle'
+  }
+}
+
+async function setupE2ePassword(): Promise<void> {
+  e2eError.value = ''
+  e2eSuccess.value = ''
+  if (e2ePassword.value.length < 6) {
+    e2eError.value = tr('密码至少 6 位')
+    return
+  }
+  if (e2ePassword.value !== e2ePasswordConfirm.value) {
+    e2eError.value = tr('两次密码不一致')
+    return
+  }
+  e2eBusy.value = true
+  try {
+    const ok = await window.pantry.e2eSetPassword(e2ePassword.value, e2eRemember.value)
+    if (ok) {
+      e2eSuccess.value = tr('加密已启用')
+      e2ePassword.value = ''
+      e2ePasswordConfirm.value = ''
+      await loadE2eStatus()
+    } else {
+      e2eError.value = tr('设置失败，请重试')
+    }
+  } finally {
+    e2eBusy.value = false
+  }
+}
+
+async function unlockE2e(): Promise<void> {
+  e2eError.value = ''
+  e2eSuccess.value = ''
+  if (!e2eUnlockPassword.value) {
+    e2eError.value = tr('请输入密码')
+    return
+  }
+  e2eBusy.value = true
+  try {
+    const ok = await window.pantry.e2eUnlock(e2eUnlockPassword.value)
+    if (ok) {
+      e2eSuccess.value = tr('已解锁')
+      e2eUnlockPassword.value = ''
+      await loadE2eStatus()
+    } else {
+      e2eError.value = tr('密码错误')
+    }
+  } finally {
+    e2eBusy.value = false
+  }
+}
+
+async function lockE2e(): Promise<void> {
+  await window.pantry.e2eLock()
+  e2eSuccess.value = ''
+  await loadE2eStatus()
+}
+
+async function resetE2eKeys(): Promise<void> {
+  e2eError.value = ''
+  e2eSuccess.value = ''
+  if (e2ePassword.value.length < 6) {
+    e2eError.value = tr('密码至少 6 位')
+    return
+  }
+  e2eBusy.value = true
+  try {
+    const ok = await window.pantry.e2eResetKeys(e2ePassword.value)
+    if (ok) {
+      e2eSuccess.value = tr('密钥已重置')
+      e2ePassword.value = ''
+      await loadE2eStatus()
+    } else {
+      e2eError.value = tr('重置失败')
+    }
+  } finally {
+    e2eBusy.value = false
+  }
 }
 
 function profileDirty(): boolean {
@@ -1369,6 +1483,125 @@ async function confirmRemove(cidr: string): Promise<void> {
             </div>
             <div class="panel-actions">
               <NButton secondary @click="resetShortcuts">{{ tr('恢复默认') }}</NButton>
+            </div>
+          </div>
+        </section>
+
+        <section v-else-if="section === 'security'" class="page-section">
+          <div class="panel">
+            <div class="panel-head">
+              <h2>{{ tr('端到端加密') }}</h2>
+              <p>{{ tr('开启后，消息和文件元数据在传输过程中被加密，只有收发双方能解密查看。') }}</p>
+            </div>
+
+            <div v-if="!e2eStatus" class="empty-state">{{ tr('加载中…') }}</div>
+
+            <!-- 未设置密码：引导启用 -->
+            <template v-else-if="!e2eStatus.hasKeys">
+              <p class="e2e-desc">{{ tr('尚未启用端到端加密。设置一个密码来生成加密密钥：') }}</p>
+              <label class="field">
+                <span>{{ tr('密码') }}</span>
+                <NInput
+                  v-model:value="e2ePassword"
+                  type="password"
+                  show-password-on="click"
+                  :placeholder="tr('至少 6 位')"
+                  :disabled="e2eBusy"
+                />
+              </label>
+              <label class="field">
+                <span>{{ tr('确认密码') }}</span>
+                <NInput
+                  v-model:value="e2ePasswordConfirm"
+                  type="password"
+                  show-password-on="click"
+                  :placeholder="tr('再次输入密码')"
+                  :disabled="e2eBusy"
+                />
+              </label>
+              <label class="field e2e-remember">
+                <NSwitch v-model:value="e2eRemember" :disabled="e2eBusy" />
+                <span>{{ tr('记住密码（重启后自动解锁）') }}</span>
+              </label>
+              <div v-if="e2eError" class="e2e-error">{{ e2eError }}</div>
+              <div v-if="e2eSuccess" class="e2e-success">{{ e2eSuccess }}</div>
+              <div class="panel-actions">
+                <NButton type="primary" :disabled="e2eBusy" @click="setupE2ePassword">
+                  {{ e2eBusy ? tr('处理中…') : tr('启用加密') }}
+                </NButton>
+              </div>
+            </template>
+
+            <!-- 已设置密码但未解锁 -->
+            <template v-else-if="!e2eStatus.unlocked">
+              <p class="e2e-desc">{{ tr('加密已启用，请输入密码解锁私钥：') }}</p>
+              <label class="field">
+                <span>{{ tr('密码') }}</span>
+                <NInput
+                  v-model:value="e2eUnlockPassword"
+                  type="password"
+                  show-password-on="click"
+                  :placeholder="tr('输入密码')"
+                  :disabled="e2eBusy"
+                  @keydown.enter="unlockE2e"
+                />
+              </label>
+              <div v-if="e2eError" class="e2e-error">{{ e2eError }}</div>
+              <div v-if="e2eSuccess" class="e2e-success">{{ e2eSuccess }}</div>
+              <div class="panel-actions">
+                <NButton type="primary" :disabled="e2eBusy" @click="unlockE2e">
+                  {{ e2eBusy ? tr('处理中…') : tr('解锁') }}
+                </NButton>
+              </div>
+            </template>
+
+            <!-- 已解锁 -->
+            <template v-else>
+              <div class="e2e-status-card">
+                <div class="e2e-status-row">
+                  <span class="e2e-label">{{ tr('状态') }}</span>
+                  <span class="e2e-badge on">{{ tr('已启用') }}</span>
+                </div>
+                <div v-if="e2eStatus.fingerprint" class="e2e-status-row">
+                  <span class="e2e-label">{{ tr('指纹') }}</span>
+                  <code class="e2e-fingerprint">{{ e2eStatus.fingerprint }}</code>
+                </div>
+                <div class="e2e-status-row">
+                  <span class="e2e-label">{{ tr('记住密码') }}</span>
+                  <span>{{ e2eStatus.rememberPassword ? tr('是') : tr('否') }}</span>
+                </div>
+              </div>
+              <div v-if="e2eError" class="e2e-error">{{ e2eError }}</div>
+              <div v-if="e2eSuccess" class="e2e-success">{{ e2eSuccess }}</div>
+              <div class="panel-actions">
+                <NButton secondary :disabled="e2eBusy" @click="lockE2e">
+                  {{ tr('锁定') }}
+                </NButton>
+              </div>
+            </template>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h2>{{ tr('重置密钥') }}</h2>
+              <p>{{ tr('生成全新的密钥对。旧密钥将无法解密之前的消息，请谨慎操作。') }}</p>
+            </div>
+            <label class="field">
+              <span>{{ tr('当前密码') }}</span>
+              <NInput
+                v-model:value="e2ePassword"
+                type="password"
+                show-password-on="click"
+                :placeholder="tr('输入当前密码')"
+                :disabled="e2eBusy"
+              />
+            </label>
+            <div v-if="e2eError" class="e2e-error">{{ e2eError }}</div>
+            <div v-if="e2eSuccess" class="e2e-success">{{ e2eSuccess }}</div>
+            <div class="panel-actions">
+              <NButton secondary type="error" :disabled="e2eBusy" @click="resetE2eKeys">
+                {{ e2eBusy ? tr('处理中…') : tr('重置密钥') }}
+              </NButton>
             </div>
           </div>
         </section>
@@ -2997,6 +3230,64 @@ async function confirmRemove(cidr: string): Promise<void> {
   .port-warning-leave-to .port-warning-dialog {
     transform: none;
   }
+}
+
+.e2e-desc {
+  color: var(--text-2);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+.e2e-remember {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.e2e-error {
+  color: var(--error-color, #d03050);
+  font-size: 12px;
+  margin: 8px 0;
+}
+.e2e-success {
+  color: var(--success-color, #18a058);
+  font-size: 12px;
+  margin: 8px 0;
+}
+.e2e-status-card {
+  background: var(--bg-list);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.e2e-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+}
+.e2e-status-row + .e2e-status-row {
+  border-top: 1px solid var(--line);
+}
+.e2e-label {
+  font-size: 13px;
+  color: var(--text-2);
+}
+.e2e-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--bg-list);
+  color: var(--text-3);
+}
+.e2e-badge.on {
+  background: var(--success-color, #18a058);
+  color: #fff;
+}
+.e2e-fingerprint {
+  font-size: 11px;
+  font-family: monospace;
+  word-break: break-all;
+  color: var(--text-2);
 }
 </style>
 
