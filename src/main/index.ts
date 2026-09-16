@@ -936,18 +936,24 @@ if (!gotLock) {
     const record = registry?.get(env.from)
     if (record) {
       record.profile.pubKey = payload.pubKey
+      console.log(`[e2e] registry.profile.pubKey 已更新 ${env.from}`)
+    } else {
+      console.warn(`[e2e] keyExchange 来自未知节点 ${env.from}，仅写库不入 registry`)
     }
     // 如果本地 crypto 已就绪，回复自己的公钥
     if (crypto?.isReady() && messenger) {
       const myPubKey = crypto.getPublicKeyForBroadcast()
       const myFingerprint = crypto.getFingerprint()
       if (myPubKey && myFingerprint) {
+        console.log(`[e2e] 回复 keyExchange 给 ${env.from}`)
         const kxEnv = makeEnvelope(MSG_TYPES.keyExchange, selfNodeId(), {
           pubKey: myPubKey,
           fingerprint: myFingerprint
         })
         void messenger.sendReliable(env.from, kxEnv)
       }
+    } else {
+      console.warn(`[e2e] 本地 crypto 未就绪，暂不回复 keyExchange (from=${env.from})`)
     }
   }
 
@@ -1477,6 +1483,7 @@ if (!gotLock) {
                 !peersKeyExchanged.has(record.profile.nodeId)
               ) {
                 peersKeyExchanged.add(record.profile.nodeId)
+                console.log(`[e2e] sending keyExchange to ${record.profile.nodeId} (registry updated)`)
                 const kxEnv = makeEnvelope(MSG_TYPES.keyExchange, selfNodeId(), {
                   pubKey,
                   fingerprint
@@ -1491,7 +1498,12 @@ if (!gotLock) {
       if (!persistTimer) {
         persistTimer = setTimeout(() => {
           persistTimer = null
-          if (registry && peersRepo) peersRepo.upsertMany(registry.values())
+          if (registry && peersRepo) {
+            const records = registry.values()
+            const withKey = records.filter((r) => r.profile.pubKey).length
+            console.log(`[e2e] persist peers: ${records.length} total, ${withKey} with pubKey`)
+            peersRepo.upsertMany(records)
+          }
         }, 1000)
       }
     })

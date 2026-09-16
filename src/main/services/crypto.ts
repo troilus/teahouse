@@ -514,7 +514,8 @@ export class CryptoService extends EventEmitter {
   }
 
   /** 保存对端公钥 */
-  savePeerPubKey(nodeId: string, pubKey: string, _fingerprint: string): void {
+  savePeerPubKey(nodeId: string, pubKey: string, fingerprint: string): void {
+    console.log(`[e2e] savePeerPubKey ${nodeId}, fingerprint=${fingerprint}`)
     this.deps.peerStore.updatePubKey(nodeId, pubKey)
   }
 

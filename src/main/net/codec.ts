@@ -88,6 +88,16 @@ function isRuntimeArch(x: unknown): x is 'x64' | 'ia32' | 'arm64' {
   return x === 'x64' || x === 'ia32' || x === 'arm64'
 }
 
+/** X25519 公钥格式：32 字节标准 base64（44 字符，可含 + / 与 = 填充），也兼容无填充的 base64url */
+function isBase64X25519Key(x: unknown): x is string {
+  return typeof x === 'string' && /^[A-Za-z0-9+/_-]{43,44}={0,2}$/.test(x)
+}
+
+/** 公钥指纹格式：sha256 前 16 字节的 hex（32 字符） */
+function isKeyFingerprint(x: unknown): x is string {
+  return typeof x === 'string' && /^[a-f0-9]{32}$/.test(x)
+}
+
 export function validateProfile(p: unknown): p is Profile {
   if (!isRecord(p)) return false
   if (!isStr(p.nodeId, LIMITS.from)) return false
@@ -104,12 +114,11 @@ export function validateProfile(p: unknown): p is Profile {
   if (!isStrAllowEmpty(p.ver, LIMITS.ver)) return false
   if (!Array.isArray(p.caps) || p.caps.length > LIMITS.caps) return false
   if (!p.caps.every((c) => typeof c === 'string' && c.length <= LIMITS.capItem)) return false
-  // pubKey：可选字段，base64 编码的 X25519 公钥
+  // pubKey：可选字段，标准 base64 编码的 X25519 公钥（32 字节 → 44 字符）
   const pubKey = (p as { pubKey?: unknown }).pubKey
   if (pubKey !== undefined) {
-    if (typeof pubKey !== 'string' || pubKey.length === 0 || pubKey.length > 100) return false
-    // 简单校验 base64 格式（44 字符的 base64url 编码）
-    if (!/^[A-Za-z0-9_-]{43,44}$/.test(pubKey)) return false
+    if (!isBase64X25519Key(pubKey)) return false
+    if (pubKey.length > 100) return false
   }
   return true
 }
@@ -485,12 +494,10 @@ function validatePayload(type: string, payload: unknown, textLimit = TEXT_UDP_LI
     case MSG_TYPES.keyExchange: {
       if (!isRecord(payload)) return false
       const kx = payload as Partial<KeyExchangePayload>
-      // pubKey：base64url 编码的 X25519 公钥（44 字符）
-      if (typeof kx.pubKey !== 'string' || kx.pubKey.length === 0) return false
-      if (!/^[A-Za-z0-9_-]{43,44}$/.test(kx.pubKey)) return false
-      // fingerprint：十六进制字符串（sha256 前 8 字节）
-      if (typeof kx.fingerprint !== 'string' || kx.fingerprint.length === 0) return false
-      if (!/^[a-f0-9]{16}$/.test(kx.fingerprint)) return false
+      // pubKey：标准 base64 编码的 X25519 公钥（32 字节 → 44 字符）
+      if (!isBase64X25519Key(kx.pubKey)) return false
+      // fingerprint：十六进制字符串（sha256 前 16 字节 → 32 字符）
+      if (!isKeyFingerprint(kx.fingerprint)) return false
       return true
     }
     case MSG_TYPES.exit:
@@ -557,6 +564,7 @@ export function decodeEnvelopeObject(raw: unknown, textLimit = TEXT_UDP_LIMIT): 
 
   const known = KNOWN_TYPES.has(raw.type)
   if (known && !validatePayload(raw.type, raw.payload, textLimit)) {
+    console.warn(`[codec] 拒绝非法载荷 type=${raw.type} from=${raw.from}`)
     return { ok: false, reason: `bad-payload:${raw.type}` }
   }
 

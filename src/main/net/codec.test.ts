@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { createHash, generateKeyPairSync } from 'node:crypto'
 import { decode, decodeTcpEnvelopeObject, encode, makeEnvelope } from './codec'
 import {
   AVATAR_MAX_BYTES,
@@ -12,6 +13,7 @@ import {
   type FileCtlOffer,
   type FileCtlPayload,
   type GroupPayload,
+  type KeyExchangePayload,
   type MsgPayload,
   type Profile,
   type ProfilePayload,
@@ -837,5 +839,87 @@ describe('codec · 共享文件柜报文（§8.2，决议 #275）', () => {
         )
       ).ok
     ).toBe(false)
+  })
+})
+
+// 端到端加密：pubKey/fingerprint 用真实 X25519 生成结果（标准 base64 + 32 hex），
+// 防止校验正则与 crypto.ts 实际生成格式再次脱节。
+function realKeyMaterial(): { pubKey: string; fingerprint: string } {
+  const { publicKey } = generateKeyPairSync('x25519', {
+    publicKeyEncoding: { type: 'spki', format: 'der' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'der' }
+  })
+  const raw = publicKey.subarray(publicKey.length - 32)
+  return {
+    pubKey: raw.toString('base64'),
+    fingerprint: createHash('sha256').update(raw).digest('hex').slice(0, 32)
+  }
+}
+
+describe('codec 端到端加密', () => {
+  it('profile 携带真实 pubKey 可往返（标准 base64，含 + / =）', () => {
+    const { pubKey } = realKeyMaterial()
+    const env = makeEnvelope<ProfilePayload>(MSG_TYPES.profile, 'node-aaaa', {
+      profile: makeProfile({ pubKey, caps: ['e2e1'] })
+    })
+    const result = decode(encode(env))
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.known).toBe(true)
+  })
+
+  it('entry/alive 携带 pubKey 同样可往返', () => {
+    const { pubKey } = realKeyMaterial()
+    for (const type of [MSG_TYPES.entry, MSG_TYPES.alive]) {
+      const env = makeEnvelope<ProfilePayload>(type, 'node-aaaa', {
+        profile: makeProfile({ pubKey })
+      })
+      expect(decode(encode(env)).ok).toBe(true)
+    }
+  })
+
+  it('keyExchange 用真实 pubKey + 32 hex 指纹可往返', () => {
+    const { pubKey, fingerprint } = realKeyMaterial()
+    const env = makeEnvelope<KeyExchangePayload>(MSG_TYPES.keyExchange, 'node-aaaa', {
+      pubKey,
+      fingerprint
+    })
+    const result = decode(encode(env))
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.known).toBe(true)
+  })
+
+  it('keyExchange 也接受无填充 base64url 公钥（向前兼容）', () => {
+    const { fingerprint } = realKeyMaterial()
+    const { publicKey } = generateKeyPairSync('x25519', {
+      publicKeyEncoding: { type: 'spki', format: 'der' },
+      privateKeyEncoding: { type: 'pkcs8', format: 'der' }
+    })
+    const pubKey = publicKey.subarray(publicKey.length - 32).toString('base64url')
+    const env = makeEnvelope<KeyExchangePayload>(MSG_TYPES.keyExchange, 'node-aaaa', {
+      pubKey,
+      fingerprint
+    })
+    expect(decode(encode(env)).ok).toBe(true)
+  })
+
+  it('keyExchange 拒绝非法 pubKey 与错误指纹长度', () => {
+    const { pubKey, fingerprint } = realKeyMaterial()
+    const bad = (payload: Partial<KeyExchangePayload>): boolean =>
+      decode(
+        encode(makeEnvelope(MSG_TYPES.keyExchange, 'node-aaaa', payload as KeyExchangePayload))
+      ).ok
+    expect(bad({ pubKey: '', fingerprint })).toBe(false)
+    expect(bad({ pubKey: 'not-a-key', fingerprint })).toBe(false)
+    expect(bad({ pubKey, fingerprint: fingerprint.slice(0, 16) })).toBe(false)
+    expect(bad({ pubKey, fingerprint: 'ZZZZ' })).toBe(false)
+  })
+
+  it('profile 携带非法 pubKey 被拒收', () => {
+    const env = makeEnvelope<ProfilePayload>(MSG_TYPES.profile, 'node-aaaa', {
+      profile: makeProfile({ pubKey: 'not-a-valid-key' })
+    })
+    expect(decode(encode(env)).ok).toBe(false)
   })
 })

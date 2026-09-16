@@ -244,6 +244,7 @@ export class Discovery {
       case MSG_TYPES.entry: {
         const { profile } = env.payload as ProfilePayload
         if (profile.nodeId !== env.from) break
+        console.log(`[e2e] recv entry from ${env.from}, pubKey=${profile.pubKey ? 'yes' : 'no'}, caps=${profile.caps.join(',')}`)
         if (this.registry.touch(env.from, rinfo.address, rinfo.port, profile)) {
           this.scheduleAliveReply(env.from, rinfo)
         }
@@ -253,6 +254,7 @@ export class Discovery {
       case MSG_TYPES.profile: {
         const { profile } = env.payload as ProfilePayload
         if (profile.nodeId !== env.from) break
+        console.log(`[e2e] recv ${env.type} from ${env.from}, pubKey=${profile.pubKey ? 'yes' : 'no'}, caps=${profile.caps.join(',')}`)
         this.registry.touch(env.from, rinfo.address, rinfo.port, profile)
         break
       }
