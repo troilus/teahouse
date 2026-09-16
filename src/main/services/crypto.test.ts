@@ -1,18 +1,25 @@
-import { describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('electron', () => ({
   safeStorage: {
-    encryptString: (s: string) => Buffer.from(s, 'utf8'),
-    decryptString: (b: Buffer) => b.toString('utf8')
+    isEncryptionAvailable: () => true,
+    encryptString: (s: string) => Buffer.from(`enc:${s}`, 'utf8'),
+    decryptString: (b: Buffer) => b.toString('utf8').replace(/^enc:/, '')
   }
 }))
 
 import {
+  CryptoService,
   decryptFromPeer,
   encryptForPeer,
   encryptForGroup,
   fingerprintFromPubKey,
-  generateKeyPair
+  generateKeyPair,
+  unwrapPrivateKey,
+  wrapPrivateKey
 } from './crypto'
 
 describe('X25519 + AES-256-GCM', () => {
@@ -66,5 +73,88 @@ describe('X25519 + AES-256-GCM', () => {
     expect(result.encryptedForMember.size).toBe(2)
     expect(decryptFromPeer(result.encryptedForMember.get('bob')!, bob.privateKey)).toBe('群消息')
     expect(decryptFromPeer(result.encryptedForMember.get('carol')!, carol.privateKey)).toBe('群消息')
+  })
+})
+
+describe('CryptoService 默认自动启用', () => {
+  const dirs: string[] = []
+  afterEach(() => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
+    dirs.length = 0
+  })
+  function makeService(path?: string): { svc: CryptoService; path: string } {
+    const dir = path ? '' : mkdtempSync(join(tmpdir(), 'teahouse-crypto-'))
+    if (dir) dirs.push(dir)
+    const identityPath = path ?? join(dir, 'identity.json')
+    const svc = new CryptoService({
+      selfId: 'node-self',
+      identityPath,
+      peerStore: {
+        getPubKey: () => null,
+        hasE2eCapability: () => false,
+        updatePubKey: () => undefined
+      }
+    })
+    return { svc, path: identityPath }
+  }
+
+  it('ensureKeys 自动生成密钥并触发 ready', () => {
+    const { svc } = makeService()
+    let ready = 0
+    svc.on('ready', () => {
+      ready += 1
+    })
+    expect(svc.isReady()).toBe(false)
+    svc.ensureKeys()
+    expect(svc.isReady()).toBe(true)
+    expect(ready).toBe(1)
+    expect(svc.getStatus().hasKeys).toBe(true)
+    expect(svc.getStatus().unlocked).toBe(true)
+    expect(svc.getPublicKeyForBroadcast()).not.toBeNull()
+  })
+
+  it('重启后从包裹私钥恢复同一密钥对', () => {
+    const { svc, path } = makeService()
+    svc.ensureKeys()
+    const fingerprint = svc.getStatus().fingerprint
+
+    const { svc: svc2 } = makeService(path)
+    svc2.ensureKeys()
+    expect(svc2.getStatus().fingerprint).toBe(fingerprint)
+    expect(svc2.isReady()).toBe(true)
+  })
+
+  it('resetKeys 无需密码即可生成新指纹', () => {
+    const { svc } = makeService()
+    svc.ensureKeys()
+    const before = svc.getStatus().fingerprint
+    expect(svc.resetKeys()).toBe(true)
+    expect(svc.getStatus().fingerprint).not.toBe(before)
+    expect(svc.isReady()).toBe(true)
+  })
+
+  it('identity.json 存的是包裹私钥而非明文', () => {
+    const { svc, path } = makeService()
+    svc.ensureKeys()
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as {
+      wrappedPrivateKey: string
+      wrappedPrivateKeyEnc: boolean
+    }
+    expect(raw.wrappedPrivateKeyEnc).toBe(true)
+    expect(raw.wrappedPrivateKey).not.toBe(svc.getKeyPair()!.privateKey)
+  })
+})
+
+describe('wrapPrivateKey / unwrapPrivateKey', () => {
+  it('safeStorage 包裹后可解包', () => {
+    const kp = generateKeyPair()
+    const { wrapped, encrypted } = wrapPrivateKey(kp.privateKey)
+    expect(encrypted).toBe(true)
+    expect(unwrapPrivateKey(wrapped, encrypted)).toBe(kp.privateKey)
+  })
+
+  it('明文回退可直接读回', () => {
+    const kp = generateKeyPair()
+    expect(unwrapPrivateKey(kp.privateKey, false)).toBe(kp.privateKey)
   })
 })

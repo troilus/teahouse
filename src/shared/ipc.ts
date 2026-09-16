@@ -117,16 +117,8 @@ export const IpcChannels = {
   updateRequest: 'update:request',
   /** 端到端加密：获取加密状态 */
   e2eGetStatus: 'e2e:get-status',
-  /** 端到端加密：设置用户密码（首次启用或修改） */
-  e2eSetPassword: 'e2e:set-password',
-  /** 端到端加密：用密码解锁私钥 */
-  e2eUnlock: 'e2e:unlock',
-  /** 端到端加密：锁定（清除内存中的私钥） */
-  e2eLock: 'e2e:lock',
   /** 端到端加密：生成新的密钥对 */
-  e2eResetKeys: 'e2e:reset-keys',
-  /** 端到端加密：获取对端加密状态 */
-  e2eGetPeerStatus: 'e2e:get-peer-status'
+  e2eResetKeys: 'e2e:reset-keys'
 } as const
 
 /** main → renderer 的事件推送 */
@@ -762,22 +754,9 @@ export interface CaptureFailureNotice {
 export interface E2eStatusView {
   /** 是否已生成密钥对 */
   hasKeys: boolean
-  /** 私钥是否已解锁（解密到内存） */
+  /** 私钥是否已就绪（解包到内存） */
   unlocked: boolean
-  /** 是否设置了用户密码 */
-  hasPassword: boolean
-  /** 是否记住密码（重启后自动解锁） */
-  rememberPassword: boolean
   /** 公钥指纹（用于显示和验证） */
-  fingerprint: string
-}
-
-export interface E2ePeerStatusView {
-  /** 对端节点 ID */
-  nodeId: string
-  /** 对端是否支持 e2e */
-  supported: boolean
-  /** 对端公钥指纹（如果已交换） */
   fingerprint: string
 }
 
@@ -1015,16 +994,8 @@ export interface PantryApi {
   endWindowDrag(): Promise<void>
   /** 端到端加密：获取当前加密状态 */
   e2eGetStatus(): Promise<E2eStatusView>
-  /** 端到端加密：设置用户密码（首次启用或修改） */
-  e2eSetPassword(password: string, remember: boolean): Promise<boolean>
-  /** 端到端加密：用密码解锁私钥 */
-  e2eUnlock(password: string): Promise<boolean>
-  /** 端到端加密：锁定（清除内存中的私钥） */
-  e2eLock(): Promise<void>
   /** 端到端加密：生成新的密钥对（会清除旧密钥） */
-  e2eResetKeys(password: string): Promise<boolean>
-  /** 端到端加密：获取对端加密状态 */
-  e2eGetPeerStatus(nodeId: string): Promise<E2ePeerStatusView>
+  e2eResetKeys(): Promise<boolean>
   /** 端到端加密状态变化监听 */
   onE2eStatusChanged(listener: (status: E2eStatusView) => void): () => void
 }

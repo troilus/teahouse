@@ -289,28 +289,13 @@ const canSendPk = computed(() =>
   isGroup.value ? canSend.value && onlineGroupRecipientCount.value > 0 : peerOnline.value
 )
 
-// 端到端加密状态（单聊）
-const e2eSelfFingerprint = ref('')
-// 只有对端公钥已成功交换（PeerView.e2eFingerprint 非空）才认为加密就绪、才显示锁
+// 端到端加密状态（单聊）：双方公钥都就绪才显示锁
+const e2eSelfStatus = ref<{ hasKeys: boolean; unlocked: boolean; fingerprint: string } | null>(null)
+let stopE2eStatus: (() => void) | null = null
 const e2ePeerFingerprint = computed(() => peer.value?.e2eFingerprint ?? '')
-const e2eReady = computed(() => e2ePeerFingerprint.value.length > 0)
-watch(
-  e2eReady,
-  async (ready) => {
-    if (!ready) {
-      e2eSelfFingerprint.value = ''
-      return
-    }
-    try {
-      const status = await window.pantry.e2eGetStatus()
-      e2eSelfFingerprint.value = status.fingerprint
-    } catch {
-      e2eSelfFingerprint.value = ''
-    }
-  },
-  { immediate: true }
-)
-const e2eSelfFingerprintShort = computed(() => e2eSelfFingerprint.value.slice(0, 8))
+const e2eSelfReady = computed(() => e2eSelfStatus.value?.unlocked === true)
+const e2eReady = computed(() => e2eSelfReady.value && e2ePeerFingerprint.value.length > 0)
+const e2eSelfFingerprintShort = computed(() => (e2eSelfStatus.value?.fingerprint ?? '').slice(0, 8))
 const e2ePeerFingerprintShort = computed(() => e2ePeerFingerprint.value.slice(0, 8))
 const pkDisabledReason = computed(() => tr('PK 只能和在线的人玩'))
 const pkToolTip = computed(() => (canSendPk.value ? 'PK' : pkDisabledReason.value))
@@ -449,6 +434,14 @@ onMounted(async () => {
     settings.value = next
     void nextTick(refreshInputFont)
   })
+  try {
+    e2eSelfStatus.value = await window.pantry.e2eGetStatus()
+  } catch {
+    e2eSelfStatus.value = null
+  }
+  stopE2eStatus = window.pantry.onE2eStatusChanged((status) => {
+    e2eSelfStatus.value = status
+  })
   stopClipboardPaste = window.pantry.onClipboardPasteImage(() => {
     // 任一 input/textarea 有焦点时由 onPaste 独占（决议 #207）；IPC 兜底仅服务
     // 焦点不在可编辑输入时（如点在消息区按 Ctrl+V）。
@@ -482,6 +475,7 @@ onUnmounted(() => {
   historySearchRun += 1
   stopSettings?.()
   stopClipboardPaste?.()
+  stopE2eStatus?.()
 })
 
 watch(
@@ -1788,7 +1782,7 @@ async function onDrop(event: DragEvent): Promise<void> {
                 <span class="e2e-lock" :title="tr('端到端加密')">🔒</span>
                 <span
                   class="e2e-fp"
-                  :title="`本机公钥指纹：${e2eSelfFingerprint}\n对端公钥指纹：${e2ePeerFingerprint}`"
+                  :title="`本机公钥指纹：${e2eSelfStatus?.fingerprint ?? ''}\n对端公钥指纹：${e2ePeerFingerprint}`"
                 >
                   <span class="e2e-fp-item">{{ tr('我') }} {{ e2eSelfFingerprintShort || '—' }}</span>
                   <span class="e2e-fp-sep">·</span>

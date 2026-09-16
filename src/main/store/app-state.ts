@@ -22,7 +22,16 @@ import {
 interface IdentityFile {
   nodeId: string
   createdAt: number
-  /** X25519 加密私钥（base64），null 表示尚未生成 E2EE 密钥 */
+  /** X25519 公钥（base64） */
+  publicKey?: string
+  /** 公钥指纹（hex） */
+  keyFingerprint?: string
+  /** safeStorage 包裹（或明文回退）的私钥（base64） */
+  wrappedPrivateKey?: string
+  /** wrappedPrivateKey 是否为 safeStorage 密文；false/缺省表示明文回退 */
+  wrappedPrivateKeyEnc?: boolean
+  // 旧版密码字段：保留以兼容历史 identity.json，不再使用
+  /** X25519 加密私钥（base64） */
   encryptedPrivateKey?: string
   /** 私钥加密 IV（base64） */
   encryptedKeyIv?: string
@@ -30,10 +39,6 @@ interface IdentityFile {
   encryptedKeyAuthTag?: string
   /** 私钥加密 salt（base64） */
   encryptedKeySalt?: string
-  /** X25519 公钥（base64） */
-  publicKey?: string
-  /** 公钥指纹（hex） */
-  keyFingerprint?: string
   /** 用户是否选择了"记住密码"（自动解密私钥） */
   rememberPassword?: boolean
   /** 加密后的密码哈希（用于验证"记住密码"的正确性） */

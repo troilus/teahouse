@@ -41,7 +41,6 @@ import {
   type DataExportOptions,
   type DataImportResult,
   type E2eStatusView,
-  type E2ePeerStatusView,
   type ExportFormat,
   type ForwardTarget,
   type GroupPatch,
@@ -1312,6 +1311,8 @@ if (!gotLock) {
           state.profile.pubKey = pubKey
           discovery?.announceProfile()
         }
+        // 通知渲染层加密状态（本机密钥已就绪）
+        if (crypto) mainWindow?.webContents.send(IpcEvents.e2eStatusChanged, crypto.getStatus())
         // 清空已发送记录，重新向所有在线 e2e1 对端发送公钥交换
         peersKeyExchanged.clear()
         if (pubKey && fingerprint && messenger && registry) {
@@ -1328,8 +1329,8 @@ if (!gotLock) {
           }
         }
       })
-      // 监听器注册完成后再尝试自动解锁（否则 'ready' 事件会丢失）
-      crypto.tryAutoUnlock()
+      // 监听器注册完成后再确保密钥就绪（否则 'ready' 事件会丢失）；默认自动生成密钥
+      crypto.ensureKeys()
       chat = new ChatService({
         selfId: state.nodeId,
         convRepo: new ConvRepo(db),
@@ -3159,61 +3160,18 @@ if (!gotLock) {
   // 端到端加密 IPC handlers
   ipcMain.handle(IpcChannels.e2eGetStatus, (): E2eStatusView => {
     if (!crypto) {
-      return { hasKeys: false, unlocked: false, hasPassword: false, rememberPassword: false, fingerprint: '' }
+      return { hasKeys: false, unlocked: false, fingerprint: '' }
     }
     return crypto.getStatus()
   })
 
-  ipcMain.handle(IpcChannels.e2eSetPassword, async (_event, password: unknown, remember: unknown): Promise<boolean> => {
-    if (typeof password !== 'string' || password.length === 0 || typeof remember !== 'boolean') return false
+  ipcMain.handle(IpcChannels.e2eResetKeys, async (): Promise<boolean> => {
     if (!crypto) return false
-    const success = crypto.setPassword(password, remember)
+    const success = crypto.resetKeys()
     if (success) {
       mainWindow?.webContents.send(IpcEvents.e2eStatusChanged, crypto.getStatus())
     }
     return success
-  })
-
-  ipcMain.handle(IpcChannels.e2eUnlock, async (_event, password: unknown): Promise<boolean> => {
-    if (typeof password !== 'string' || password.length === 0) return false
-    if (!crypto) return false
-    const success = crypto.unlock(password)
-    if (success) {
-      mainWindow?.webContents.send(IpcEvents.e2eStatusChanged, crypto.getStatus())
-    }
-    return success
-  })
-
-  ipcMain.handle(IpcChannels.e2eLock, async (): Promise<void> => {
-    if (!crypto) return
-    crypto.lock()
-    mainWindow?.webContents.send(IpcEvents.e2eStatusChanged, crypto.getStatus())
-  })
-
-  ipcMain.handle(IpcChannels.e2eResetKeys, async (_event, password: unknown): Promise<boolean> => {
-    if (typeof password !== 'string' || password.length === 0) return false
-    if (!crypto) return false
-    const success = crypto.resetKeys(password)
-    if (success) {
-      mainWindow?.webContents.send(IpcEvents.e2eStatusChanged, crypto.getStatus())
-    }
-    return success
-  })
-
-  ipcMain.handle(IpcChannels.e2eGetPeerStatus, (_event, nodeId: unknown): E2ePeerStatusView => {
-    if (typeof nodeId !== 'string' || nodeId.length === 0 || nodeId.length > LIMITS.from) {
-      return { nodeId: '', supported: false, fingerprint: '' }
-    }
-    if (!crypto || !peersRepo) {
-      return { nodeId, supported: false, fingerprint: '' }
-    }
-    const pubKey = peersRepo.getPubKey(nodeId)
-    const hasE2e = peersRepo.hasE2eCapability(nodeId)
-    return {
-      nodeId,
-      supported: hasE2e,
-      fingerprint: pubKey ? crypto.fingerprintFromPubKey(pubKey) : ''
-    }
   })
 
   app.on('second-instance', () => {

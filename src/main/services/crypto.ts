@@ -10,8 +10,7 @@ import {
   diffieHellman,
   createHash,
   createHmac,
-  randomBytes,
-  scryptSync
+  randomBytes
 } from 'node:crypto'
 import type { KeyObject } from 'node:crypto'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
@@ -131,58 +130,29 @@ export { fingerprintFromPubKey } from '../util/key-fingerprint'
 
 // ─── 密码保护 ────────────────────────────────────────────────────────────────
 
-/** 用用户密码加密私钥（PBKDF2 + AES-256-GCM） */
-export function encryptPrivateKey(privateKeyBase64: string, password: string): {
-  encryptedKey: string
-  iv: string
-  authTag: string
-  salt: string
-} {
-  const salt = randomBytes(SALT_LENGTH)
-  const key = scryptSync(password, salt, KEY_LENGTH)
-  const iv = randomBytes(IV_LENGTH)
-  const cipher = createCipheriv(ALGORITHM, key, iv)
-
-  const encrypted = Buffer.concat([
-    cipher.update(Buffer.from(privateKeyBase64, 'base64')),
-    cipher.final()
-  ])
-  const authTag = cipher.getAuthTag()
-
-  return {
-    encryptedKey: encrypted.toString('base64'),
-    iv: iv.toString('base64'),
-    authTag: authTag.toString('base64'),
-    salt: salt.toString('base64')
+/** 用操作系统密钥链（safeStorage）包裹私钥；不可用时明文回退并告警。
+ *  返回 { wrapped, encrypted }：encrypted 标记 wrapped 是否为 safeStorage 密文。 */
+export function wrapPrivateKey(privateKeyBase64: string): { wrapped: string; encrypted: boolean } {
+  try {
+    if (safeStorage.isEncryptionAvailable()) {
+      return { wrapped: safeStorage.encryptString(privateKeyBase64).toString('base64'), encrypted: true }
+    }
+  } catch (err) {
+    console.warn('[e2e] safeStorage unavailable, falling back to plaintext key:', err)
   }
+  console.warn('[e2e] OS keychain not available; private key stored as plaintext')
+  return { wrapped: privateKeyBase64, encrypted: false }
 }
 
-/** 用用户密码解密私钥 */
-export function decryptPrivateKey(
-  encryptedKeyBase64: string,
-  password: string,
-  ivBase64: string,
-  authTagBase64: string,
-  saltBase64: string
-): string | null {
+/** 解包私钥；失败返回 null（调用方应重新生成密钥对） */
+export function unwrapPrivateKey(wrapped: string, encrypted: boolean): string | null {
+  if (!encrypted) return wrapped
   try {
-    const salt = Buffer.from(saltBase64, 'base64')
-    const key = scryptSync(password, salt, KEY_LENGTH)
-    const iv = Buffer.from(ivBase64, 'base64')
-    const authTag = Buffer.from(authTagBase64, 'base64')
-    const encrypted = Buffer.from(encryptedKeyBase64, 'base64')
-
-    const decipher = createDecipheriv(ALGORITHM, key, iv)
-    decipher.setAuthTag(authTag)
-
-    const decrypted = Buffer.concat([
-      decipher.update(encrypted),
-      decipher.final()
-    ])
-
-    return decrypted.toString('base64')
-  } catch {
-    return null // 密码错误或数据损坏
+    const value = safeStorage.decryptString(Buffer.from(wrapped, 'base64'))
+    return value || null
+  } catch (err) {
+    console.warn('[e2e] failed to unwrap private key:', err)
+    return null
   }
 }
 
@@ -309,8 +279,6 @@ export function encryptForGroup(
 export interface E2eStatusView {
   hasKeys: boolean
   unlocked: boolean
-  hasPassword: boolean
-  rememberPassword: boolean
   fingerprint: string
 }
 
@@ -318,12 +286,17 @@ export class CryptoService extends EventEmitter {
   private keyPair: E2eKeyPair | null = null
   private deps: CryptoDeps
   private identityData: {
+    publicKey?: string
+    fingerprint?: string
+    /** safeStorage 包裹（或明文回退）的私钥（base64） */
+    wrappedPrivateKey?: string
+    /** wrappedPrivateKey 是否为 safeStorage 密文；false/缺省表示明文回退 */
+    wrappedPrivateKeyEnc?: boolean
+    // 旧版密码字段：保留以兼容历史 identity.json，不再使用
     encryptedPrivateKey?: string
     encryptedKeyIv?: string
     encryptedKeyAuthTag?: string
     encryptedKeySalt?: string
-    publicKey?: string
-    fingerprint?: string
     rememberPassword?: boolean
     passwordHash?: string
     encryptedPassword?: string
@@ -333,8 +306,8 @@ export class CryptoService extends EventEmitter {
     super()
     this.deps = deps
     this.loadIdentity()
-    // 注意：不要在这里 autoUnlock —— 'ready' 事件会早于外部监听器注册而丢失。
-    // 由 index.ts 在注册 crypto.on('ready') 之后显式调用 tryAutoUnlock()。
+    // 注意：不要在这里生成/解锁密钥 —— 'ready' 事件会早于外部监听器注册而丢失。
+    // 由 index.ts 在注册 crypto.on('ready') 之后显式调用 ensureKeys()。
   }
 
   /** 从 identity.json 加载密钥数据 */
@@ -349,19 +322,42 @@ export class CryptoService extends EventEmitter {
     }
   }
 
-  /** 启动时自动解锁：rememberPassword=true 且 encryptedPassword 存在时，用 safeStorage 解密密码并 unlock。
+  /** 确保密钥就绪（默认启用加密）：内存已有→就绪；有包裹密钥→解包；否则生成新密钥对。
    *  必须在外部注册 'ready' 监听器之后调用。 */
-  tryAutoUnlock(): void {
-    if (!this.identityData?.rememberPassword || !this.identityData?.encryptedPassword) return
-    try {
-      const password = safeStorage.decryptString(Buffer.from(this.identityData.encryptedPassword, 'base64'))
-      if (password) {
-        const unlocked = this.unlock(password)
-        console.log(`[e2e] autoUnlock: ${unlocked ? 'ok' : 'failed'}`)
-      }
-    } catch (err) {
-      console.warn('[e2e] autoUnlock failed:', err)
+  ensureKeys(): void {
+    if (this.keyPair) {
+      this.emit('ready')
+      return
     }
+    const id = this.identityData
+    if (id?.publicKey && id.wrappedPrivateKey) {
+      const privateKey = unwrapPrivateKey(id.wrappedPrivateKey, id.wrappedPrivateKeyEnc === true)
+      if (privateKey) {
+        this.keyPair = { publicKey: id.publicKey, privateKey, fingerprint: id.fingerprint ?? '' }
+        console.log('[e2e] keys unlocked from identity')
+        this.emit('ready')
+        return
+      }
+      console.warn('[e2e] stored key unusable, regenerating')
+    }
+    this.generateAndStore()
+  }
+
+  /** 生成新密钥对、用 safeStorage 包裹并落盘，随后就绪 */
+  private generateAndStore(): void {
+    const kp = generateKeyPair()
+    const { wrapped, encrypted } = wrapPrivateKey(kp.privateKey)
+    this.identityData = {
+      ...this.identityData,
+      publicKey: kp.publicKey,
+      fingerprint: kp.fingerprint,
+      wrappedPrivateKey: wrapped,
+      wrappedPrivateKeyEnc: encrypted
+    }
+    this.saveIdentity()
+    this.keyPair = kp
+    console.log(`[e2e] new keypair generated, fingerprint=${kp.fingerprint}`)
+    this.emit('ready')
   }
 
   /** 持久化身份数据到 identity.json */
@@ -383,119 +379,13 @@ export class CryptoService extends EventEmitter {
     }
   }
 
-  /** 设置用户密码并生成/加密密钥对 */
-  setPassword(password: string, remember: boolean): boolean {
+  /** 生成全新的密钥对（无需密码，会清除旧密钥） */
+  resetKeys(): boolean {
     try {
-      // 如果还没有密钥对，先生成
-      if (!this.identityData?.publicKey || !this.identityData?.encryptedPrivateKey) {
-        const kp = generateKeyPair()
-        const encrypted = encryptPrivateKey(kp.privateKey, password)
-        this.identityData = {
-          ...this.identityData,
-          publicKey: kp.publicKey,
-          fingerprint: kp.fingerprint,
-          encryptedPrivateKey: encrypted.encryptedKey,
-          encryptedKeyIv: encrypted.iv,
-          encryptedKeyAuthTag: encrypted.authTag,
-          encryptedKeySalt: encrypted.salt,
-          rememberPassword: remember,
-          passwordHash: createHash('sha256').update(password).digest('hex'),
-          encryptedPassword: remember ? safeStorage.encryptString(password).toString('base64') : undefined
-        }
-        this.saveIdentity()
-        // 设置密钥到内存，使服务就绪
-        this.keyPair = kp
-        this.emit('ready')
-      } else {
-        // 已有密钥，更新密码相关字段
-        if (this.keyPair) {
-          const encrypted = encryptPrivateKey(this.keyPair.privateKey, password)
-          this.identityData = {
-            ...this.identityData,
-            encryptedPrivateKey: encrypted.encryptedKey,
-            encryptedKeyIv: encrypted.iv,
-            encryptedKeyAuthTag: encrypted.authTag,
-            encryptedKeySalt: encrypted.salt,
-            rememberPassword: remember,
-            passwordHash: createHash('sha256').update(password).digest('hex'),
-            encryptedPassword: remember ? safeStorage.encryptString(password).toString('base64') : undefined
-          }
-        } else {
-          // 未解锁状态改密码：先用新密码解密旧密钥验证（如果可能），这里简化处理
-          this.identityData = {
-            ...this.identityData,
-            rememberPassword: remember,
-            passwordHash: createHash('sha256').update(password).digest('hex'),
-            encryptedPassword: remember ? safeStorage.encryptString(password).toString('base64') : undefined
-          }
-        }
-        this.saveIdentity()
-        // 如果未解锁，尝试用新密码解锁
-        if (!this.keyPair) {
-          this.unlock(password)
-        }
-      }
+      this.generateAndStore()
       return true
     } catch (err) {
-      console.error('[crypto] 设置密码失败：', err)
-      return false
-    }
-  }
-
-  /** 用密码解锁私钥 */
-  unlock(password: string): boolean {
-    if (!this.identityData?.encryptedPrivateKey) return false
-    try {
-      const privateKey = decryptPrivateKey(
-        this.identityData.encryptedPrivateKey,
-        password,
-        this.identityData.encryptedKeyIv!,
-        this.identityData.encryptedKeyAuthTag!,
-        this.identityData.encryptedKeySalt!
-      )
-      if (!privateKey) return false
-      this.keyPair = {
-        publicKey: this.identityData.publicKey!,
-        privateKey,
-        fingerprint: this.identityData.fingerprint!
-      }
-      this.emit('ready')
-      return true
-    } catch {
-      return false
-    }
-  }
-
-  /** 锁定（清除内存中的私钥） */
-  lock(): void {
-    this.keyPair = null
-    this.emit('locked')
-  }
-
-  /** 生成新的密钥对（会清除旧密钥） */
-  resetKeys(password: string): boolean {
-    try {
-      const kp = generateKeyPair()
-      const encrypted = encryptPrivateKey(kp.privateKey, password)
-      this.identityData = {
-        ...this.identityData,
-        publicKey: kp.publicKey,
-        fingerprint: kp.fingerprint,
-        encryptedPrivateKey: encrypted.encryptedKey,
-        encryptedKeyIv: encrypted.iv,
-        encryptedKeyAuthTag: encrypted.authTag,
-        encryptedKeySalt: encrypted.salt,
-        passwordHash: createHash('sha256').update(password).digest('hex'),
-        encryptedPassword: this.identityData?.rememberPassword
-          ? safeStorage.encryptString(password).toString('base64')
-          : undefined
-      }
-      this.saveIdentity()
-      this.keyPair = kp
-      this.emit('ready')
-      return true
-    } catch (err) {
-      console.error('[crypto] 重置密钥失败：', err)
+      console.error('[crypto] reset keys failed:', err)
       return false
     }
   }
@@ -505,8 +395,6 @@ export class CryptoService extends EventEmitter {
     return {
       hasKeys: !!this.identityData?.publicKey,
       unlocked: this.keyPair !== null,
-      hasPassword: !!this.identityData?.passwordHash,
-      rememberPassword: this.identityData?.rememberPassword ?? false,
       fingerprint: this.identityData?.fingerprint ?? ''
     }
   }
