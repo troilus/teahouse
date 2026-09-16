@@ -994,7 +994,7 @@ export interface PantryApi {
   endWindowDrag(): Promise<void>
   /** 端到端加密：获取当前加密状态 */
   e2eGetStatus(): Promise<E2eStatusView>
-  /** 端到端加密：生成新的密钥对（会清除旧密钥） */
+  /** 端到端加密：生成新的密钥对 */
   e2eResetKeys(): Promise<boolean>
   /** 端到端加密状态变化监听 */
   onE2eStatusChanged(listener: (status: E2eStatusView) => void): () => void

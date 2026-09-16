@@ -1444,7 +1444,7 @@ async function confirmRemove(cidr: string): Promise<void> {
           <div class="panel">
             <div class="panel-head">
               <h2>{{ tr('重置密钥') }}</h2>
-              <p>{{ tr('生成全新的密钥对。旧密钥将无法解密之前的消息，请谨慎操作。') }}</p>
+              <p>{{ tr('生成全新的密钥对。') }}</p>
             </div>
             <div v-if="e2eError" class="e2e-error">{{ e2eError }}</div>
             <div v-if="e2eSuccess" class="e2e-success">{{ e2eSuccess }}</div>
@@ -1455,7 +1455,7 @@ async function confirmRemove(cidr: string): Promise<void> {
                     {{ e2eBusy ? tr('处理中…') : tr('重置密钥') }}
                   </NButton>
                 </template>
-                {{ tr('确定要重置密钥吗？旧密钥将无法解密之前的消息。') }}
+                {{ tr('确定要重置密钥吗？') }}
               </NPopconfirm>
             </div>
           </div>

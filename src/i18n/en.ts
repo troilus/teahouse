@@ -947,13 +947,13 @@ const english: Record<string, string> = {
   "是": "Yes",
   "否": "No",
   "重置密钥": "Reset keys",
-  "生成全新的密钥对。旧密钥将无法解密之前的消息，请谨慎操作。": "Generate a brand-new key pair. Old keys can no longer decrypt previous messages, so proceed with caution.",
+  "生成全新的密钥对。": "Generate a brand-new key pair.",
   "当前密码": "Current password",
   "输入当前密码": "Enter current password",
   "对方": "Peer",
   "未启用": "Disabled",
   "本机指纹": "Local fingerprint",
   "加密默认自动启用，无需设置密码。首次使用会自动生成密钥对。": "Encryption is enabled automatically — no password needed. A key pair is generated on first use.",
-  "确定要重置密钥吗？旧密钥将无法解密之前的消息。": "Reset the keys? Old keys can no longer decrypt previous messages."
+  "确定要重置密钥吗？": "Reset the keys?"
 }
 export default english
