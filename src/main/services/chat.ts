@@ -148,7 +148,7 @@ export class ChatService extends EventEmitter {
     if (shouldEncrypt) {
       const encrypted = this.deps.crypto!.encryptText(trimmed, peerId)
       if (encrypted) {
-        console.log(`[e2e] 加密成功，密文长度=${encrypted.ciphertext.length}`)
+        console.log(`[e2e] encrypt ok, cipherLen=${encrypted.ciphertext.length}`)
         env = makeEnvelope<MsgPayload>(MSG_TYPES.msg, this.deps.selfId, {
           kind: 'encrypted-text',
           ciphertext: encrypted.ciphertext,
@@ -160,7 +160,7 @@ export class ChatService extends EventEmitter {
         // 本地存储明文（用于显示和搜索）
         contentForDb = trimmed
       } else {
-        console.warn(`[e2e] encryptText 返回 null，降级为明文`)
+        console.warn(`[e2e] encryptText returned null, fallback to plaintext`)
         // 加密失败，降级为明文
         env = makeEnvelope<MsgPayload>(MSG_TYPES.msg, this.deps.selfId, {
           kind: 'text',
@@ -168,7 +168,7 @@ export class ChatService extends EventEmitter {
         })
       }
     } else {
-      console.log(`[e2e] 不加密（shouldEncrypt=false），原因: cryptoReady=${cryptoReady}`)
+      console.log(`[e2e] no encryption (shouldEncrypt=false), cryptoReady=${cryptoReady}`)
       env = makeEnvelope<MsgPayload>(MSG_TYPES.msg, this.deps.selfId, {
         kind: 'text',
         text: trimmed
@@ -373,7 +373,7 @@ export class ChatService extends EventEmitter {
   private onIncomingEncryptedText(env: Envelope<MsgPayload>): void {
     const payload = env.payload as MsgPayload
     if (payload.kind !== 'encrypted-text') return
-    console.log(`[e2e] 收到来自 ${env.from} 的加密消息`)
+    console.log(`[e2e] recv encrypted msg from ${env.from}`)
 
     // 尝试解密
     let plaintext: string | null = null
@@ -386,9 +386,9 @@ export class ChatService extends EventEmitter {
         senderPubKey: payload.senderPubKey
       }
       plaintext = this.deps.crypto.decryptText(encryptedPayload)
-      console.log(`[e2e] 解密${plaintext ? '成功' : '失败'}，明文长度=${plaintext?.length ?? 0}`)
+      console.log(`[e2e] decrypt ${plaintext ? 'ok' : 'failed'}, plainLen=${plaintext?.length ?? 0}`)
     } else {
-      console.warn(`[e2e] 本地 crypto 未就绪，无法解密`)
+      console.warn(`[e2e] local crypto not ready, cannot decrypt`)
     }
 
     const convId = this.deps.convRepo.ensureSingle(env.from)

@@ -98,7 +98,7 @@ const sections = computed<Array<{ id: Section; icon: string; label: string; summ
   },
   {
     id: 'security',
-    icon: 'settings-about',
+    icon: 'settings-security',
     label: tr('安全'),
     summary: tr('端到端加密：保护消息和文件元数据的隐私。')
   },

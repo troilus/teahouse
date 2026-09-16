@@ -11,17 +11,18 @@ const iconNames = [
   'settings-notify',
   'settings-storage',
   'settings-network',
+  'settings-security',
   'settings-shortcuts',
   'settings-about'
 ]
 
 describe('设置分组导航图标', () => {
-  it('七个设置分组都有固定语义图标', () => {
+  it('八个设置分组都有固定语义图标', () => {
     for (const name of iconNames) {
       expect(settingsSource).toContain(`icon: '${name}'`)
       expect(iconSource).toContain(`name === '${name}'`)
     }
-    expect(settingsSource.match(/icon: 'settings-/g)).toHaveLength(7)
+    expect(settingsSource.match(/icon: 'settings-/g)).toHaveLength(8)
     expect(settingsSource).toContain(
       '<SettingsNavIcon class="nav-icon" :name="item.icon" :size="18" />'
     )

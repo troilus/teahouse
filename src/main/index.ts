@@ -929,7 +929,7 @@ if (!gotLock) {
   function handleKeyExchange(env: Envelope): void {
     const payload = env.payload as { pubKey: string; fingerprint: string }
     if (typeof payload.pubKey !== 'string' || typeof payload.fingerprint !== 'string') return
-    console.log(`[e2e] 收到来自 ${env.from} 的公钥交换，指纹=${payload.fingerprint}`)
+    console.log(`[e2e] recv keyExchange from ${env.from}, fingerprint=${payload.fingerprint}`)
     // 无条件存储公钥（不需要本地 crypto 就绪）
     crypto?.savePeerPubKey(env.from, payload.pubKey, payload.fingerprint)
     // 同时更新内存中的 registry，使 getPubKey 等查询立即生效
@@ -1293,7 +1293,7 @@ if (!gotLock) {
       crypto.on('ready', () => {
         const pubKey = crypto?.getPublicKeyForBroadcast()
         const fingerprint = crypto?.getFingerprint()
-        console.log(`[e2e] 加密服务就绪，公钥指纹=${fingerprint}`)
+        console.log(`[e2e] crypto ready, pubKey fingerprint=${fingerprint}`)
         if (pubKey && state) {
           state.profile.pubKey = pubKey
           discovery?.announceProfile()
@@ -1304,7 +1304,7 @@ if (!gotLock) {
           for (const record of registry.values()) {
             if (record.online && record.profile.caps.includes(CAPS.e2eEncrypted)) {
               peersKeyExchanged.add(record.profile.nodeId)
-              console.log(`[e2e] 向 ${record.profile.nodeId} 发送公钥交换`)
+              console.log(`[e2e] sending keyExchange to ${record.profile.nodeId}`)
               const kxEnv = makeEnvelope(MSG_TYPES.keyExchange, state.nodeId, {
                 pubKey,
                 fingerprint
@@ -1314,6 +1314,8 @@ if (!gotLock) {
           }
         }
       })
+      // 监听器注册完成后再尝试自动解锁（否则 'ready' 事件会丢失）
+      crypto.tryAutoUnlock()
       chat = new ChatService({
         selfId: state.nodeId,
         convRepo: new ConvRepo(db),

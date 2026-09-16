@@ -66,6 +66,11 @@ withDefaults(
       <path d="M13.5 13h3" />
       <path d="M8.5 15.7h7" />
     </g>
+    <g v-else-if="name === 'settings-security'">
+      <path d="M12 4.5l6 2.2v5c0 3.7-2.5 6.6-6 7.8-3.5-1.2-6-4.1-6-7.8v-5l6-2.2Z" />
+      <rect x="9.8" y="11.1" width="4.4" height="3.3" rx="0.8" />
+      <path d="M10.8 11.1v-1.1a1.2 1.2 0 0 1 2.4 0v1.1" />
+    </g>
     <g v-else-if="name === 'settings-about'">
       <circle cx="12" cy="12" r="7.5" />
       <path d="M12 11.2v4.8" />

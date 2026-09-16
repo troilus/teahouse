@@ -75,7 +75,12 @@ export class PeersRepo {
 
     this.getPubKeyStmt = db.prepare('SELECT pub_key FROM peers WHERE node_id = ?')
     this.hasE2eStmt = db.prepare('SELECT caps FROM peers WHERE node_id = ?')
-    this.updatePubKeyStmt = db.prepare('UPDATE peers SET pub_key = ? WHERE node_id = ?')
+    // 公钥交换可能先于 upsertMany 到达，用 upsert 兜底建占位行（同 remarkStmt 模式）
+    this.updatePubKeyStmt = db.prepare(`
+      INSERT INTO peers (node_id, nick, pub_key, first_seen, last_seen)
+      VALUES (?, '', ?, ?, ?)
+      ON CONFLICT(node_id) DO UPDATE SET pub_key = excluded.pub_key
+    `)
 
     this.upsertManyTx = db.transaction((records: PeerRecord[]) => {
       for (const record of records) this.upsertOne(record)
@@ -137,9 +142,10 @@ export class PeersRepo {
     }
   }
 
-  /** 更新指定节点的公钥（用于密钥交换） */
+  /** 更新指定节点的公钥（用于密钥交换）；节点未入库时建占位行 */
   updatePubKey(nodeId: string, pubKey: string): void {
-    this.updatePubKeyStmt.run(pubKey, nodeId)
+    const now = Date.now()
+    this.updatePubKeyStmt.run(nodeId, pubKey, now, now)
   }
 
   /** 全量载入为离线记录（在线态由网络层实时判定，不持久化） */

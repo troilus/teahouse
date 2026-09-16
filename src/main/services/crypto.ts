@@ -5,16 +5,60 @@ import {
   createCipheriv,
   createDecipheriv,
   generateKeyPairSync,
-  createECDH,
+  createPublicKey,
+  createPrivateKey,
+  diffieHellman,
   createHash,
   createHmac,
   randomBytes,
   scryptSync
 } from 'node:crypto'
+import type { KeyObject } from 'node:crypto'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { safeStorage } from 'electron'
+
+// ─── X25519 原始密钥 ↔ DER 包装 ──────────────────────────────────────────────
+// Node 的 createECDH 不支持 x25519，必须用 crypto.diffieHellman + KeyObject。
+// 这里存储的是 32 字节原始密钥，需要补上 DER 头才能构造 KeyObject。
+
+/** X25519 公钥 SPKI DER 头（12 字节） */
+const X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex')
+/** X25519 私钥 PKCS8 DER 头（16 字节） */
+const X25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b656e04220420', 'hex')
+
+/** 从 32 字节原始公钥构造 KeyObject */
+function publicKeyFromRaw(raw: Buffer): KeyObject {
+  return createPublicKey({
+    key: Buffer.concat([X25519_SPKI_PREFIX, raw]),
+    format: 'der',
+    type: 'spki'
+  })
+}
+
+/** 从 32 字节原始私钥构造 KeyObject */
+function privateKeyFromRaw(raw: Buffer): KeyObject {
+  return createPrivateKey({
+    key: Buffer.concat([X25519_PKCS8_PREFIX, raw]),
+    format: 'der',
+    type: 'pkcs8'
+  })
+}
+
+/** 从原始私钥推导对应的 32 字节原始公钥 */
+function publicRawFromPrivate(privateKeyBase64: string): Buffer {
+  const privObj = privateKeyFromRaw(Buffer.from(privateKeyBase64, 'base64'))
+  const der = createPublicKey(privObj).export({ type: 'spki', format: 'der' }) as Buffer
+  return Buffer.from(der).subarray(der.length - 32)
+}
+
+/** X25519 密钥协商：用私钥和对方公钥计算 32 字节共享密钥 */
+function x25519SharedSecret(privateKeyBase64: string, publicKeyBase64: string): Buffer {
+  const privateKey = privateKeyFromRaw(Buffer.from(privateKeyBase64, 'base64'))
+  const publicKey = publicKeyFromRaw(Buffer.from(publicKeyBase64, 'base64'))
+  return diffieHellman({ privateKey, publicKey })
+}
 
 // ─── 常量 ───────────────────────────────────────────────────────────────────
 
@@ -170,13 +214,8 @@ export function encryptForPeer(
   recipientPubKeyBase64: string,
   senderPrivateKeyBase64: string
 ): EncryptedPayload {
-  const senderPriv = Buffer.from(senderPrivateKeyBase64, 'base64')
-  const recipientPub = Buffer.from(recipientPubKeyBase64, 'base64')
-
-  // ECDH 密钥协商
-  const ecdh = createECDH('x25519')
-  ecdh.setPrivateKey(senderPriv)
-  const sharedSecret = ecdh.computeSecret(recipientPub)
+  // ECDH 密钥协商（X25519 via crypto.diffieHellman）
+  const sharedSecret = x25519SharedSecret(senderPrivateKeyBase64, recipientPubKeyBase64)
 
   // 生成随机 salt 和 IV
   const salt = randomBytes(SALT_LENGTH)
@@ -194,7 +233,7 @@ export function encryptForPeer(
   const authTag = cipher.getAuthTag()
 
   // 发送方公钥（供接收方反向协商）
-  const senderPub = ecdh.getPublicKey()
+  const senderPub = publicRawFromPrivate(senderPrivateKeyBase64)
 
   return {
     ciphertext: encrypted.toString('base64'),
@@ -213,13 +252,8 @@ export function decryptFromPeer(
   recipientPrivateKeyBase64: string
 ): string | null {
   try {
-    const recipientPriv = Buffer.from(recipientPrivateKeyBase64, 'base64')
-    const senderPub = Buffer.from(payload.senderPubKey, 'base64')
-
     // ECDH 密钥协商（与发送方计算相同的共享密钥）
-    const ecdh = createECDH('x25519')
-    ecdh.setPrivateKey(recipientPriv)
-    const sharedSecret = ecdh.computeSecret(senderPub)
+    const sharedSecret = x25519SharedSecret(recipientPrivateKeyBase64, payload.senderPubKey)
 
     // 派生 AES 密钥
     const salt = Buffer.from(payload.salt, 'base64')
@@ -253,61 +287,22 @@ export interface GroupEncryptedResult {
 
 /**
  * 群聊 per-member 加密
- * 为每条消息生成随机 messageKey，用 messageKey 加密明文，
- * 再用每个成员的公钥分别加密 messageKey。
+ * 对每个成员分别做 X25519 协商 + AES-256-GCM 加密（与单聊同一套方案），
+ * 保证接收方用 decryptFromPeer 即可解密。
+ * 注：groups.ts 实际逐成员调用 encryptText，此函数为批量封装，保持接口一致。
  */
 export function encryptForGroup(
   plaintext: string,
   memberPubKeys: Map<string, string>,
   senderPrivateKeyBase64: string
 ): GroupEncryptedResult {
-  // 生成随机 messageKey
-  const messageKey = randomBytes(KEY_LENGTH)
-  const iv = randomBytes(IV_LENGTH)
-
-  // 用 messageKey 加密明文
-  const cipher = createCipheriv(ALGORITHM, messageKey, iv)
-  const encrypted = Buffer.concat([
-    cipher.update(plaintext, 'utf8'),
-    cipher.final()
-  ])
-  const authTag = cipher.getAuthTag()
-
   const encryptedForMember = new Map<string, EncryptedPayload>()
-
-  // 为每个成员加密 messageKey
-  const senderPriv = Buffer.from(senderPrivateKeyBase64, 'base64')
-  const ecdh = createECDH('x25519')
-  ecdh.setPrivateKey(senderPriv)
-  const senderPub = ecdh.getPublicKey()
-
   for (const [memberId, memberPubKeyBase64] of memberPubKeys) {
-    const memberPub = Buffer.from(memberPubKeyBase64, 'base64')
-    const sharedSecret = ecdh.computeSecret(memberPub)
-
-    // 用成员专属 salt 派生 AES 密钥
-    const memberSalt = randomBytes(SALT_LENGTH)
-    const aesKey = deriveAesKey(sharedSecret, memberSalt)
-
-    // 加密密文（包含原始 authTag）
-    const memberIvForMsg = randomBytes(IV_LENGTH)
-    const memberCipherForMsg = createCipheriv(ALGORITHM, aesKey, memberIvForMsg)
-    const encryptedMsg = Buffer.concat([
-      memberCipherForMsg.update(encrypted),
-      memberCipherForMsg.update(authTag),
-      memberCipherForMsg.final()
-    ])
-    const msgAuthTag = memberCipherForMsg.getAuthTag()
-
-    encryptedForMember.set(memberId, {
-      ciphertext: encryptedMsg.toString('base64'),
-      iv: memberIvForMsg.toString('base64'),
-      authTag: msgAuthTag.toString('base64'),
-      salt: memberSalt.toString('base64'),
-      senderPubKey: senderPub.toString('base64')
-    })
+    encryptedForMember.set(
+      memberId,
+      encryptForPeer(plaintext, memberPubKeyBase64, senderPrivateKeyBase64)
+    )
   }
-
   return { encryptedForMember }
 }
 
@@ -340,7 +335,8 @@ export class CryptoService extends EventEmitter {
     super()
     this.deps = deps
     this.loadIdentity()
-    this.autoUnlock()
+    // 注意：不要在这里 autoUnlock —— 'ready' 事件会早于外部监听器注册而丢失。
+    // 由 index.ts 在注册 crypto.on('ready') 之后显式调用 tryAutoUnlock()。
   }
 
   /** 从 identity.json 加载密钥数据 */
@@ -355,17 +351,18 @@ export class CryptoService extends EventEmitter {
     }
   }
 
-  /** 启动时自动解锁：rememberPassword=true 且 encryptedPassword 存在时，用 safeStorage 解密密码并 unlock */
-  private autoUnlock(): void {
+  /** 启动时自动解锁：rememberPassword=true 且 encryptedPassword 存在时，用 safeStorage 解密密码并 unlock。
+   *  必须在外部注册 'ready' 监听器之后调用。 */
+  tryAutoUnlock(): void {
     if (!this.identityData?.rememberPassword || !this.identityData?.encryptedPassword) return
     try {
       const password = safeStorage.decryptString(Buffer.from(this.identityData.encryptedPassword, 'base64'))
       if (password) {
         const unlocked = this.unlock(password)
-        console.log(`[e2e] autoUnlock: ${unlocked ? '成功' : '失败'}`)
+        console.log(`[e2e] autoUnlock: ${unlocked ? 'ok' : 'failed'}`)
       }
     } catch (err) {
-      console.warn('[e2e] autoUnlock 失败：', err)
+      console.warn('[e2e] autoUnlock failed:', err)
     }
   }
 
@@ -551,11 +548,11 @@ export class CryptoService extends EventEmitter {
       return false
     }
     if (!this.deps.peerStore.hasE2eCapability(nodeId)) {
-      console.log(`[e2e] shouldEncrypt(${nodeId}): false (对端无 e2e1 能力)`)
+      console.log(`[e2e] shouldEncrypt(${nodeId}): false (peer has no e2e1 cap)`)
       return false
     }
     if (!this.deps.peerStore.getPubKey(nodeId)) {
-      console.log(`[e2e] shouldEncrypt(${nodeId}): false (对端公钥未知)`)
+      console.log(`[e2e] shouldEncrypt(${nodeId}): false (peer pubKey unknown)`)
       return false
     }
     console.log(`[e2e] shouldEncrypt(${nodeId}): true`)

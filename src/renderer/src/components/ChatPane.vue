@@ -291,6 +291,7 @@ const canSendPk = computed(() =>
 
 // 端到端加密状态（单聊）
 const e2ePeerStatus = ref<{ supported: boolean; fingerprint: string } | null>(null)
+const e2eSelfFingerprint = ref('')
 watch(
   () => peer.value?.nodeId,
   async (nodeId) => {
@@ -306,6 +307,24 @@ watch(
   },
   { immediate: true }
 )
+watch(
+  () => e2ePeerStatus.value?.supported,
+  async (supported) => {
+    if (!supported) {
+      e2eSelfFingerprint.value = ''
+      return
+    }
+    try {
+      const status = await window.pantry.e2eGetStatus()
+      e2eSelfFingerprint.value = status.fingerprint
+    } catch {
+      e2eSelfFingerprint.value = ''
+    }
+  },
+  { immediate: true }
+)
+const e2eSelfFingerprintShort = computed(() => e2eSelfFingerprint.value.slice(0, 8))
+const e2ePeerFingerprintShort = computed(() => (e2ePeerStatus.value?.fingerprint ?? '').slice(0, 8))
 const pkDisabledReason = computed(() => tr('PK 只能和在线的人玩'))
 const pkToolTip = computed(() => (canSendPk.value ? 'PK' : pkDisabledReason.value))
 const nudgeRetryRemainingMs = computed(() => Math.max(0, nudgeRetryUntil.value - nudgeNow.value))
@@ -1778,7 +1797,17 @@ async function onDrop(event: DragEvent): Promise<void> {
           <span class="title-text">
             <span class="title-row">
               <span class="title">{{ peerName }}</span>
-              <span v-if="e2ePeerStatus?.supported" class="e2e-lock" :title="tr('端到端加密')">🔒</span>
+              <template v-if="e2ePeerStatus?.supported">
+                <span class="e2e-lock" :title="tr('端到端加密')">🔒</span>
+                <span
+                  class="e2e-fp"
+                  :title="`本机公钥指纹：${e2eSelfFingerprint}\n对端公钥指纹：${e2ePeerStatus.fingerprint}`"
+                >
+                  <span class="e2e-fp-item">{{ tr('我') }} {{ e2eSelfFingerprintShort || '—' }}</span>
+                  <span class="e2e-fp-sep">·</span>
+                  <span class="e2e-fp-item">{{ tr('对方') }} {{ e2ePeerFingerprintShort || '—' }}</span>
+                </span>
+              </template>
             </span>
             <span class="subtitle">
               <span class="state-word" :class="{ on: peerOnline }">{{
@@ -3078,6 +3107,22 @@ async function onDrop(event: DragEvent): Promise<void> {
   font-size: 11px;
   flex-shrink: 0;
   cursor: help;
+}
+.e2e-fp {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-3);
+  flex-shrink: 0;
+  cursor: help;
+}
+.e2e-fp-item {
+  white-space: nowrap;
+}
+.e2e-fp-sep {
+  opacity: 0.5;
 }
 .title-button:hover .title,
 .title-button.active .title {

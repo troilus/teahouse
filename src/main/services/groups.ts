@@ -291,8 +291,9 @@ export class GroupsService extends EventEmitter {
     }
 
     // 本端入库（明文，用于本地显示和搜索）
+    const localMsgId = `${this.deps.selfId}-${Date.now()}`
     this.deps.msgRepo.insert({
-      id: `${this.deps.selfId}-${Date.now()}`,
+      id: localMsgId,
       convId,
       senderId: this.deps.selfId,
       isMine: true,
@@ -311,7 +312,7 @@ export class GroupsService extends EventEmitter {
 
       const memberPubKey = this.deps.getPeerPubKey?.(member)
       const memberSupportsE2e = memberPubKey && this.deps.crypto?.shouldEncrypt(member)
-      console.log(`[e2e] 群聊发 ${member}: pubKey=${memberPubKey ? '有' : '无'}, encrypt=${memberSupportsE2e}`)
+      console.log(`[e2e] group send ${member}: pubKey=${memberPubKey ? 'yes' : 'no'}, encrypt=${memberSupportsE2e}`)
 
       let env: Envelope<MsgPayload>
       if (memberSupportsE2e && this.deps.crypto) {
@@ -339,7 +340,7 @@ export class GroupsService extends EventEmitter {
       void this.deps.messenger.sendUserMessage(member, env)
     }
 
-    const row = this.deps.msgRepo.get(`${this.deps.selfId}-${Date.now()}`)
+    const row = this.deps.msgRepo.get(localMsgId)
     return row ? msgRowToView(row) : null
   }
 
@@ -425,7 +426,7 @@ export class GroupsService extends EventEmitter {
     let replyTo: string | undefined
 
     if (payload.kind === 'encrypted-group-text') {
-      console.log(`[e2e] 收到来自 ${env.from} 的加密群消息`)
+      console.log(`[e2e] recv encrypted group msg from ${env.from}`)
       // 尝试解密
       let plaintext: string | null = null
       if (this.deps.crypto?.isReady()) {
@@ -437,9 +438,9 @@ export class GroupsService extends EventEmitter {
           senderPubKey: payload.senderPubKey
         }
         plaintext = this.deps.crypto.decryptText(encryptedPayload)
-        console.log(`[e2e] 群消息解密${plaintext ? '成功' : '失败'}`)
+        console.log(`[e2e] group decrypt ${plaintext ? 'ok' : 'failed'}`)
       } else {
-        console.warn(`[e2e] 本地 crypto 未就绪，无法解密群消息`)
+        console.warn(`[e2e] local crypto not ready, cannot decrypt group msg`)
       }
       textContent = plaintext ?? '[无法解密的消息]'
       mentions = payload.mentions
