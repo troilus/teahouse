@@ -286,6 +286,7 @@ if (!gotLock) {
   let nudgeShakeTimers: Array<ReturnType<typeof setTimeout>> = []
   const rangeScanTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const peersKeyExchanged = new Set<string>() // 已交换过公钥的对端
+  let lastLoggedPubKeyCount = -1 // 上次打印「持有公钥的对端数」，用于降噪
   let globalScanTimer: ReturnType<typeof setTimeout> | null = null
   let globalScanSeq = 0
   let lastGlobalScanProgressPushAt = 0
@@ -803,7 +804,9 @@ if (!gotLock) {
       online: record.online,
       lastSeen: record.lastSeen,
       ver: record.profile.ver,
-      caps: Array.isArray(record.profile.caps) ? record.profile.caps : []
+      caps: Array.isArray(record.profile.caps) ? record.profile.caps : [],
+      e2eFingerprint:
+        record.profile.pubKey && crypto ? crypto.fingerprintFromPubKey(record.profile.pubKey) : ''
     }
   }
 
@@ -929,6 +932,11 @@ if (!gotLock) {
   function handleKeyExchange(env: Envelope): void {
     const payload = env.payload as { pubKey: string; fingerprint: string }
     if (typeof payload.pubKey !== 'string' || typeof payload.fingerprint !== 'string') return
+
+    // 已持有同一把公钥：静默忽略，避免双方互相回包造成无限 ping-pong
+    const existing = peersRepo?.getPubKey(env.from) ?? null
+    if (existing === payload.pubKey) return
+
     console.log(`[e2e] recv keyExchange from ${env.from}, fingerprint=${payload.fingerprint}`)
     // 无条件存储公钥（不需要本地 crypto 就绪）
     crypto?.savePeerPubKey(env.from, payload.pubKey, payload.fingerprint)
@@ -936,24 +944,24 @@ if (!gotLock) {
     const record = registry?.get(env.from)
     if (record) {
       record.profile.pubKey = payload.pubKey
-      console.log(`[e2e] registry.profile.pubKey 已更新 ${env.from}`)
+      console.log(`[e2e] registry pubKey updated for ${env.from}`)
+      registry?.emit('updated') // 让 PeerView.e2eFingerprint 及时推送到渲染层
     } else {
-      console.warn(`[e2e] keyExchange 来自未知节点 ${env.from}，仅写库不入 registry`)
+      console.warn(`[e2e] keyExchange from unknown node ${env.from}, persisted only`)
     }
-    // 如果本地 crypto 已就绪，回复自己的公钥
-    if (crypto?.isReady() && messenger) {
+    // 每个对端只回一次公钥（peersKeyExchanged 去重）
+    if (crypto?.isReady() && messenger && !peersKeyExchanged.has(env.from)) {
       const myPubKey = crypto.getPublicKeyForBroadcast()
       const myFingerprint = crypto.getFingerprint()
       if (myPubKey && myFingerprint) {
-        console.log(`[e2e] 回复 keyExchange 给 ${env.from}`)
+        peersKeyExchanged.add(env.from)
+        console.log(`[e2e] replying keyExchange to ${env.from}`)
         const kxEnv = makeEnvelope(MSG_TYPES.keyExchange, selfNodeId(), {
           pubKey: myPubKey,
           fingerprint: myFingerprint
         })
         void messenger.sendReliable(env.from, kxEnv)
       }
-    } else {
-      console.warn(`[e2e] 本地 crypto 未就绪，暂不回复 keyExchange (from=${env.from})`)
     }
   }
 
@@ -1501,7 +1509,10 @@ if (!gotLock) {
           if (registry && peersRepo) {
             const records = registry.values()
             const withKey = records.filter((r) => r.profile.pubKey).length
-            console.log(`[e2e] persist peers: ${records.length} total, ${withKey} with pubKey`)
+            if (withKey !== lastLoggedPubKeyCount) {
+              lastLoggedPubKeyCount = withKey
+              console.log(`[e2e] persist peers: ${records.length} total, ${withKey} with pubKey`)
+            }
             peersRepo.upsertMany(records)
           }
         }, 1000)

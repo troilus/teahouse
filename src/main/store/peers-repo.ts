@@ -146,7 +146,7 @@ export class PeersRepo {
   updatePubKey(nodeId: string, pubKey: string): void {
     const now = Date.now()
     this.updatePubKeyStmt.run(nodeId, pubKey, now, now)
-    console.log(`[e2e] peers.pub_key 写入 ${nodeId} (len=${pubKey.length})`)
+    console.log(`[e2e] peers.pub_key written ${nodeId} (len=${pubKey.length})`)
   }
 
   /** 全量载入为离线记录（在线态由网络层实时判定，不持久化） */

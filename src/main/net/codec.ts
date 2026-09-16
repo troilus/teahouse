@@ -564,7 +564,7 @@ export function decodeEnvelopeObject(raw: unknown, textLimit = TEXT_UDP_LIMIT): 
 
   const known = KNOWN_TYPES.has(raw.type)
   if (known && !validatePayload(raw.type, raw.payload, textLimit)) {
-    console.warn(`[codec] 拒绝非法载荷 type=${raw.type} from=${raw.from}`)
+    console.warn(`[codec] reject invalid payload type=${raw.type} from=${raw.from}`)
     return { ok: false, reason: `bad-payload:${raw.type}` }
   }
 

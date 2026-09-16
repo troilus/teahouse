@@ -11,6 +11,7 @@ import type { PeerRegistry } from '../net/peer-registry'
 import { toFtsQuery } from '../store/fts'
 import { parsePkRef, pkPreview } from '../../shared/pk'
 import { messagePreview } from '../store/msg-repo'
+import { fingerprintFromPubKey } from '../util/key-fingerprint'
 
 // 全局搜索（F-MSG-5 / ui-design §6）：联系人（全量含离线）/ 聊天记录（按会话聚合）/ 文件。
 // 中文按字短语匹配走 FTS5；联系人与文件名走 LIKE（千级数据量足够）。
@@ -83,7 +84,8 @@ export class SearchService {
         online: r.online,
         lastSeen: r.lastSeen,
         ver: r.profile.ver,
-        caps: Array.isArray(r.profile.caps) ? r.profile.caps : []
+        caps: Array.isArray(r.profile.caps) ? r.profile.caps : [],
+        e2eFingerprint: r.profile.pubKey ? fingerprintFromPubKey(r.profile.pubKey) : ''
       }))
 
     // 聊天记录：FTS 短语匹配，按会话聚合 + 各会话最新命中作摘要

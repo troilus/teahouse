@@ -18,6 +18,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { safeStorage } from 'electron'
+import { fingerprintFromPubKey } from '../util/key-fingerprint'
 
 // ─── X25519 原始密钥 ↔ DER 包装 ──────────────────────────────────────────────
 // Node 的 createECDH 不支持 x25519，必须用 crypto.diffieHellman + KeyObject。
@@ -125,11 +126,8 @@ export function generateKeyPair(): E2eKeyPair {
   return { publicKey: pubBase64, privateKey: privBase64, fingerprint }
 }
 
-/** 从 base64 公钥提取指纹（不需私钥） */
-export function fingerprintFromPubKey(pubKeyBase64: string): string {
-  const rawPub = Buffer.from(pubKeyBase64, 'base64')
-  return createHash('sha256').update(rawPub).digest('hex').slice(0, FINGERPRINT_LENGTH * 2)
-}
+/** 从 base64 公钥提取指纹（不需私钥）；实现见 util/key-fingerprint（纯函数，可被 search 等复用） */
+export { fingerprintFromPubKey } from '../util/key-fingerprint'
 
 // ─── 密码保护 ────────────────────────────────────────────────────────────────
 

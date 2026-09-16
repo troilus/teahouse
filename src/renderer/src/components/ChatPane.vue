@@ -290,27 +290,14 @@ const canSendPk = computed(() =>
 )
 
 // 端到端加密状态（单聊）
-const e2ePeerStatus = ref<{ supported: boolean; fingerprint: string } | null>(null)
 const e2eSelfFingerprint = ref('')
+// 只有对端公钥已成功交换（PeerView.e2eFingerprint 非空）才认为加密就绪、才显示锁
+const e2ePeerFingerprint = computed(() => peer.value?.e2eFingerprint ?? '')
+const e2eReady = computed(() => e2ePeerFingerprint.value.length > 0)
 watch(
-  () => peer.value?.nodeId,
-  async (nodeId) => {
-    if (!nodeId || isGroup.value) {
-      e2ePeerStatus.value = null
-      return
-    }
-    try {
-      e2ePeerStatus.value = await window.pantry.e2eGetPeerStatus(nodeId)
-    } catch {
-      e2ePeerStatus.value = null
-    }
-  },
-  { immediate: true }
-)
-watch(
-  () => e2ePeerStatus.value?.supported,
-  async (supported) => {
-    if (!supported) {
+  e2eReady,
+  async (ready) => {
+    if (!ready) {
       e2eSelfFingerprint.value = ''
       return
     }
@@ -324,7 +311,7 @@ watch(
   { immediate: true }
 )
 const e2eSelfFingerprintShort = computed(() => e2eSelfFingerprint.value.slice(0, 8))
-const e2ePeerFingerprintShort = computed(() => (e2ePeerStatus.value?.fingerprint ?? '').slice(0, 8))
+const e2ePeerFingerprintShort = computed(() => e2ePeerFingerprint.value.slice(0, 8))
 const pkDisabledReason = computed(() => tr('PK 只能和在线的人玩'))
 const pkToolTip = computed(() => (canSendPk.value ? 'PK' : pkDisabledReason.value))
 const nudgeRetryRemainingMs = computed(() => Math.max(0, nudgeRetryUntil.value - nudgeNow.value))
@@ -1797,11 +1784,11 @@ async function onDrop(event: DragEvent): Promise<void> {
           <span class="title-text">
             <span class="title-row">
               <span class="title">{{ peerName }}</span>
-              <template v-if="e2ePeerStatus?.supported">
+              <template v-if="e2eReady">
                 <span class="e2e-lock" :title="tr('端到端加密')">🔒</span>
                 <span
                   class="e2e-fp"
-                  :title="`本机公钥指纹：${e2eSelfFingerprint}\n对端公钥指纹：${e2ePeerStatus.fingerprint}`"
+                  :title="`本机公钥指纹：${e2eSelfFingerprint}\n对端公钥指纹：${e2ePeerFingerprint}`"
                 >
                   <span class="e2e-fp-item">{{ tr('我') }} {{ e2eSelfFingerprintShort || '—' }}</span>
                   <span class="e2e-fp-sep">·</span>

@@ -207,6 +207,8 @@ export interface PeerView {
   ver: string
   /** 对端声明的能力位；未知位渲染层忽略。 */
   caps: string[]
+  /** 对端公钥指纹（hex）；空串/缺省表示尚未完成端到端加密公钥交换。 */
+  e2eFingerprint?: string
 }
 
 /** 局域网自更新：当前可用的更新源（决议 #166）；无更新源时主进程返回 null。 */
