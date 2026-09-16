@@ -38,6 +38,8 @@ interface IdentityFile {
   rememberPassword?: boolean
   /** 加密后的密码哈希（用于验证"记住密码"的正确性） */
   passwordHash?: string
+  /** safeStorage 加密后的密码（base64），rememberPassword=true 时存储 */
+  encryptedPassword?: string
 }
 
 export interface ConfigFile {

@@ -1300,7 +1300,7 @@ if (!gotLock) {
         }
         // 清空已发送记录，重新向所有在线 e2e1 对端发送公钥交换
         peersKeyExchanged.clear()
-        if (pubKey && fingerprint && messenger) {
+        if (pubKey && fingerprint && messenger && registry) {
           for (const record of registry.values()) {
             if (record.online && record.profile.caps.includes(CAPS.e2eEncrypted)) {
               peersKeyExchanged.add(record.profile.nodeId)
@@ -1464,7 +1464,7 @@ if (!gotLock) {
         mainWindow?.webContents.send(IpcEvents.updateAvailable, currentUpdateAvailability())
         avatars?.ensureAll()
         // 向新上线且支持 e2e1 的对端发送公钥
-        if (crypto?.isReady() && messenger) {
+        if (crypto?.isReady() && messenger && registry) {
           const pubKey = crypto.getPublicKeyForBroadcast()
           const fingerprint = crypto.getFingerprint()
           if (pubKey && fingerprint) {

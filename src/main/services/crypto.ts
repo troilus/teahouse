@@ -14,12 +14,12 @@ import {
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { EventEmitter } from 'node:events'
+import { safeStorage } from 'electron'
 
 // ─── 常量 ───────────────────────────────────────────────────────────────────
 
 const ALGORITHM = 'aes-256-gcm'
 const IV_LENGTH = 12       // GCM 推荐 12 字节
-const AUTH_TAG_LENGTH = 16 // GCM 标准 16 字节
 const SALT_LENGTH = 32     // HKDF salt
 const KEY_LENGTH = 32      // AES-256
 const HKDF_INFO = 'teahouse-e2ee-v1'
@@ -263,7 +263,6 @@ export function encryptForGroup(
 ): GroupEncryptedResult {
   // 生成随机 messageKey
   const messageKey = randomBytes(KEY_LENGTH)
-  const salt = randomBytes(SALT_LENGTH)
   const iv = randomBytes(IV_LENGTH)
 
   // 用 messageKey 加密明文
@@ -274,7 +273,7 @@ export function encryptForGroup(
   ])
   const authTag = cipher.getAuthTag()
 
-  const encryptedForResult = new Map<string, EncryptedPayload>()
+  const encryptedForMember = new Map<string, EncryptedPayload>()
 
   // 为每个成员加密 messageKey
   const senderPriv = Buffer.from(senderPrivateKeyBase64, 'base64')
@@ -288,20 +287,9 @@ export function encryptForGroup(
 
     // 用成员专属 salt 派生 AES 密钥
     const memberSalt = randomBytes(SALT_LENGTH)
-    const memberIv = randomBytes(IV_LENGTH)
     const aesKey = deriveAesKey(sharedSecret, memberSalt)
 
-    // 加密 messageKey
-    const memberCipher = createCipheriv(ALGORITHM, aesKey, memberIv)
-    const encryptedKey = Buffer.concat([
-      memberCipher.update(messageKey),
-      memberCipher.final()
-    ])
-    const keyAuthTag = memberCipher.getAuthTag()
-
-    // 发送密文时：ciphertext + 加密后的 messageKey + 各自的 salt/iv
-    // 这里我们把 messageKey 加密到 ciphertext 的载荷中
-    // 实际传输格式：对每个成员发送完整的加密消息（包含加密的 key）
+    // 加密密文（包含原始 authTag）
     const memberIvForMsg = randomBytes(IV_LENGTH)
     const memberCipherForMsg = createCipheriv(ALGORITHM, aesKey, memberIvForMsg)
     const encryptedMsg = Buffer.concat([
@@ -345,12 +333,14 @@ export class CryptoService extends EventEmitter {
     fingerprint?: string
     rememberPassword?: boolean
     passwordHash?: string
+    encryptedPassword?: string
   } | null = null
 
   constructor(deps: CryptoDeps) {
     super()
     this.deps = deps
     this.loadIdentity()
+    this.autoUnlock()
   }
 
   /** 从 identity.json 加载密钥数据 */
@@ -362,6 +352,20 @@ export class CryptoService extends EventEmitter {
       }
     } catch {
       // 文件不存在或解析失败，忽略
+    }
+  }
+
+  /** 启动时自动解锁：rememberPassword=true 且 encryptedPassword 存在时，用 safeStorage 解密密码并 unlock */
+  private autoUnlock(): void {
+    if (!this.identityData?.rememberPassword || !this.identityData?.encryptedPassword) return
+    try {
+      const password = safeStorage.decryptString(Buffer.from(this.identityData.encryptedPassword, 'base64'))
+      if (password) {
+        const unlocked = this.unlock(password)
+        console.log(`[e2e] autoUnlock: ${unlocked ? '成功' : '失败'}`)
+      }
+    } catch (err) {
+      console.warn('[e2e] autoUnlock 失败：', err)
     }
   }
 
@@ -400,7 +404,8 @@ export class CryptoService extends EventEmitter {
           encryptedKeyAuthTag: encrypted.authTag,
           encryptedKeySalt: encrypted.salt,
           rememberPassword: remember,
-          passwordHash: createHash('sha256').update(password).digest('hex')
+          passwordHash: createHash('sha256').update(password).digest('hex'),
+          encryptedPassword: remember ? safeStorage.encryptString(password).toString('base64') : undefined
         }
         this.saveIdentity()
         // 设置密钥到内存，使服务就绪
@@ -417,14 +422,16 @@ export class CryptoService extends EventEmitter {
             encryptedKeyAuthTag: encrypted.authTag,
             encryptedKeySalt: encrypted.salt,
             rememberPassword: remember,
-            passwordHash: createHash('sha256').update(password).digest('hex')
+            passwordHash: createHash('sha256').update(password).digest('hex'),
+            encryptedPassword: remember ? safeStorage.encryptString(password).toString('base64') : undefined
           }
         } else {
           // 未解锁状态改密码：先用新密码解密旧密钥验证（如果可能），这里简化处理
           this.identityData = {
             ...this.identityData,
             rememberPassword: remember,
-            passwordHash: createHash('sha256').update(password).digest('hex')
+            passwordHash: createHash('sha256').update(password).digest('hex'),
+            encryptedPassword: remember ? safeStorage.encryptString(password).toString('base64') : undefined
           }
         }
         this.saveIdentity()
@@ -483,7 +490,10 @@ export class CryptoService extends EventEmitter {
         encryptedKeyIv: encrypted.iv,
         encryptedKeyAuthTag: encrypted.authTag,
         encryptedKeySalt: encrypted.salt,
-        passwordHash: createHash('sha256').update(password).digest('hex')
+        passwordHash: createHash('sha256').update(password).digest('hex'),
+        encryptedPassword: this.identityData?.rememberPassword
+          ? safeStorage.encryptString(password).toString('base64')
+          : undefined
       }
       this.saveIdentity()
       this.keyPair = kp

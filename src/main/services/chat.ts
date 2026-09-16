@@ -142,7 +142,6 @@ export class ChatService extends EventEmitter {
     let env: Envelope<MsgPayload>
     let contentForDb = trimmed
     const cryptoReady = this.deps.crypto?.isReady() ?? false
-    const hasPeerPubKey = this.deps.crypto ? !!(this.deps.crypto as any).deps?.peerStore?.getPubKey(peerId) : false
     const shouldEncrypt = this.deps.crypto?.shouldEncrypt(peerId) ?? false
     console.log(`[e2e] sendText to ${peerId}: cryptoReady=${cryptoReady}, shouldEncrypt=${shouldEncrypt}`)
 
