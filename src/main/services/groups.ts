@@ -290,23 +290,8 @@ export class GroupsService extends EventEmitter {
       }
     }
 
-    // 本端入库（明文，用于本地显示和搜索）
-    const localMsgId = `${this.deps.selfId}-${Date.now()}`
-    this.deps.msgRepo.insert({
-      id: localMsgId,
-      convId,
-      senderId: this.deps.selfId,
-      isMine: true,
-      kind: 'text',
-      content: contentForDb,
-      ts: Date.now(),
-      status: 'sent',
-      replyTo: replyTo
-    })
-    this.deps.convRepo.bump(convId, Date.now())
-    this.emitConvs()
-
-    // 逐成员发送
+    // 先为每个成员生成报文，据此判断是否「全员加密」
+    const outgoing: Array<{ member: string; env: Envelope<MsgPayload>; encrypted: boolean }> = []
     for (const member of meta.members) {
       if (member === this.deps.selfId) continue
 
@@ -315,16 +300,18 @@ export class GroupsService extends EventEmitter {
       console.log(`[e2e] group send ${member}: pubKey=${memberPubKey ? 'yes' : 'no'}, encrypt=${memberSupportsE2e}`)
 
       let env: Envelope<MsgPayload>
+      let encrypted = false
       if (memberSupportsE2e && this.deps.crypto) {
-        const encrypted = this.deps.crypto.encryptText(trimmed, member)
-        if (encrypted) {
+        const enc = this.deps.crypto.encryptText(trimmed, member)
+        if (enc) {
+          encrypted = true
           env = makeEnvelope<MsgPayload>(MSG_TYPES.msg, this.deps.selfId, {
             kind: 'encrypted-group-text',
-            ciphertext: encrypted.ciphertext,
-            iv: encrypted.iv,
-            authTag: encrypted.authTag,
-            salt: encrypted.salt,
-            senderPubKey: encrypted.senderPubKey,
+            ciphertext: enc.ciphertext,
+            iv: enc.iv,
+            authTag: enc.authTag,
+            salt: enc.salt,
+            senderPubKey: enc.senderPubKey,
             groupId,
             groupRev: meta.rev,
             ...(cleanMentions.length > 0 ? { mentions: cleanMentions } : {}),
@@ -337,7 +324,30 @@ export class GroupsService extends EventEmitter {
         env = makeEnvelope<MsgPayload>(MSG_TYPES.msg, this.deps.selfId, basePayload)
       }
 
-      void this.deps.messenger.sendUserMessage(member, env)
+      outgoing.push({ member, env, encrypted })
+    }
+    // 全部收件人都加密，本端副本才标记为已加密
+    const allEncrypted = outgoing.length > 0 && outgoing.every((item) => item.encrypted)
+
+    // 本端入库（明文，用于本地显示和搜索）
+    const localMsgId = `${this.deps.selfId}-${Date.now()}`
+    this.deps.msgRepo.insert({
+      id: localMsgId,
+      convId,
+      senderId: this.deps.selfId,
+      isMine: true,
+      kind: 'text',
+      content: contentForDb,
+      ts: Date.now(),
+      status: 'sent',
+      replyTo: replyTo,
+      encrypted: allEncrypted
+    })
+    this.deps.convRepo.bump(convId, Date.now())
+    this.emitConvs()
+
+    for (const item of outgoing) {
+      void this.deps.messenger.sendUserMessage(item.member, item.env)
     }
 
     const row = this.deps.msgRepo.get(localMsgId)
@@ -460,7 +470,8 @@ export class GroupsService extends EventEmitter {
       content: textContent,
       ts,
       status: 'sent',
-      replyTo
+      replyTo,
+      encrypted: payload.kind === 'encrypted-group-text'
     })
     if (inserted) {
       this.deps.convRepo.bump(convId, ts)

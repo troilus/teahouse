@@ -7,6 +7,7 @@ import type { Messenger, SendOutcome } from '../net/messenger'
 import type { ConvRepo } from '../store/conv-repo'
 import type { GroupRepo } from '../store/group-repo'
 import type { MsgRepo, MsgRow, NewMessage } from '../store/msg-repo'
+import type { CryptoService } from './crypto'
 
 class FakeMessenger extends EventEmitter {
   sent: Array<{ peerId: string; env: Envelope<MsgPayload> }> = []
@@ -54,7 +55,8 @@ class FakeMsgRepo {
       ts: msg.ts,
       seq: this.rows.size + 1,
       status: msg.status,
-      reply_to: msg.replyTo
+      reply_to: msg.replyTo,
+      encrypted: msg.encrypted ? 1 : 0
     })
     return true
   }
@@ -151,6 +153,36 @@ describe('ChatService 会话设置', () => {
     expect(events).toHaveLength(0)
     await Promise.resolve()
     expect(events).toHaveLength(1)
+  })
+
+  it('加密发送的消息本地标记 encrypted，明文发送不标记', () => {
+    const msgRepo = new FakeMsgRepo()
+    const fakeCrypto = {
+      isReady: () => true,
+      shouldEncrypt: (peerId: string) => peerId === 'node-cipher',
+      encryptText: () => ({
+        ciphertext: 'c',
+        iv: 'i',
+        authTag: 'a',
+        salt: 's',
+        senderPubKey: 'p'
+      })
+    } as unknown as CryptoService
+    const chat = new ChatService({
+      selfId: 'node-self',
+      convRepo: new FakeConvRepo() as unknown as ConvRepo,
+      msgRepo: msgRepo as unknown as MsgRepo,
+      messenger: new FakeMessenger() as unknown as Messenger,
+      crypto: fakeCrypto
+    })
+
+    const cipher = chat.sendText('node-cipher', '机密')
+    const plain = chat.sendText('node-plain', '普通')
+
+    expect(cipher?.encrypted).toBe(true)
+    expect(plain?.encrypted).toBe(false)
+    expect(msgRepo.inserted.find((m) => m.id === cipher!.id)?.encrypted).toBe(true)
+    expect(msgRepo.inserted.find((m) => m.id === plain!.id)?.encrypted).toBe(false)
   })
 
   it('可直接查询单个会话的免打扰状态', () => {

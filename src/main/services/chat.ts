@@ -141,6 +141,7 @@ export class ChatService extends EventEmitter {
     // 尝试加密：如果 crypto 就绪且对端支持 e2e1，则加密发送
     let env: Envelope<MsgPayload>
     let contentForDb = trimmed
+    let encryptedForDb = false
     const cryptoReady = this.deps.crypto?.isReady() ?? false
     const shouldEncrypt = this.deps.crypto?.shouldEncrypt(peerId) ?? false
     console.log(`[e2e] sendText to ${peerId}: cryptoReady=${cryptoReady}, shouldEncrypt=${shouldEncrypt}`)
@@ -159,6 +160,7 @@ export class ChatService extends EventEmitter {
         })
         // 本地存储明文（用于显示和搜索）
         contentForDb = trimmed
+        encryptedForDb = true
       } else {
         console.warn(`[e2e] encryptText returned null, fallback to plaintext`)
         // 加密失败，降级为明文
@@ -183,7 +185,8 @@ export class ChatService extends EventEmitter {
       kind: 'text',
       content: contentForDb,
       ts: env.ts,
-      status: 'sending'
+      status: 'sending',
+      encrypted: encryptedForDb
     })
     this.deps.convRepo.bump(convId, env.ts)
     this.emitConvs()
@@ -403,7 +406,8 @@ export class ChatService extends EventEmitter {
       kind: 'text',
       content: plaintext ?? '[无法解密的消息]',
       ts,
-      status: 'sent'
+      status: 'sent',
+      encrypted: true
     })
     if (!inserted) return
     this.deps.convRepo.bump(convId, ts)

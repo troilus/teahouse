@@ -16,6 +16,7 @@ export interface MsgRow {
   seq: number
   status: string
   reply_to?: string | null
+  encrypted?: number
 }
 
 export interface NewMessage {
@@ -31,6 +32,8 @@ export interface NewMessage {
   status: 'sending' | 'sent' | 'queued' | 'failed' | 'canceled' | 'recalled'
   /** 引用的源消息元数据（senderName + text），仅群聊文本消息可携带；存入 reply_to JSON */
   replyTo?: string
+  /** 本条消息是否端到端加密（气泡右下角锁标） */
+  encrypted?: boolean
 }
 
 /** 行 → 渲染层视图（chat 与 files 服务共用） */
@@ -44,7 +47,8 @@ export function msgRowToView(row: MsgRow): MessageView {
     ts: row.ts,
     seq: row.seq,
     status: row.status as MessageView['status'],
-    replyTo: row.reply_to || undefined
+    replyTo: row.reply_to || undefined,
+    encrypted: (row.encrypted ?? 0) !== 0
   }
 }
 
@@ -97,8 +101,8 @@ export class MsgRepo {
 
   constructor(db: DatabaseT.Database) {
     this.insertStmt = db.prepare(`
-      INSERT OR IGNORE INTO messages (id, conv_id, sender_id, is_mine, kind, content, file_ref, ts, seq, status, reply_to)
-      VALUES (@id, @convId, @senderId, @isMine, @kind, @content, @fileRef, @ts, @seq, @status, @replyTo)
+      INSERT OR IGNORE INTO messages (id, conv_id, sender_id, is_mine, kind, content, file_ref, ts, seq, status, reply_to, encrypted)
+      VALUES (@id, @convId, @senderId, @isMine, @kind, @content, @fileRef, @ts, @seq, @status, @replyTo, @encrypted)
     `)
     this.insertFtsStmt = db.prepare('INSERT INTO messages_fts (msg_id, text) VALUES (?, ?)')
     this.nextSeqStmt = db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM messages')
@@ -151,7 +155,8 @@ export class MsgRepo {
       ts: msg.ts,
       seq,
       status: msg.status,
-      replyTo: msg.replyTo
+      replyTo: msg.replyTo,
+      encrypted: msg.encrypted ? 1 : 0
     })
     if (info.changes === 0) return false
     const tokens = msg.kind === 'system' ? '' : toFtsTokens(msg.content)

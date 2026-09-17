@@ -168,6 +168,7 @@ const replyMeta = computed((): ReplyMeta => {
       <div
         v-else
         class="bubble message-surface"
+        :class="{ encrypted: props.msg.encrypted }"
         @contextmenu.prevent.stop="openMessageMenu"
       >
         <template v-for="(part, partIndex) in parts" :key="partIndex">
@@ -189,6 +190,13 @@ const replyMeta = computed((): ReplyMeta => {
             </template>
           </span>
         </template>
+        <span
+          v-if="props.msg.encrypted"
+          class="encrypted-badge"
+          :title="tr('端到端加密')"
+        >
+          <PantryIcon name="lock" :size="11" />
+        </span>
       </div>
       <div v-if="props.msg.replyTo" class="reply-quote" @click.stop="$emit('reply-to', props.msg.replyTo)">
         <span class="reply-quote-label">{{ tr('引用') }}</span>
@@ -358,6 +366,20 @@ const replyMeta = computed((): ReplyMeta => {
   word-break: break-word;
   white-space: pre-wrap;
   user-select: text;
+  position: relative;
+}
+/* 已加密气泡：右下角留出锁标空间 */
+.bubble.encrypted {
+  padding-bottom: 15px;
+}
+.encrypted-badge {
+  position: absolute;
+  right: 6px;
+  bottom: 3px;
+  display: inline-flex;
+  color: var(--text-3);
+  opacity: 0.72;
+  pointer-events: none;
 }
 .row.peer .bubble {
   background: var(--bubble-peer);

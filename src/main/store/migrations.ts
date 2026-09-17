@@ -210,6 +210,11 @@ export const MIGRATIONS: ReadonlyArray<string> = [
   // v17：端到端加密公钥存储（X25519 密钥协商）
   `
   ALTER TABLE peers ADD COLUMN pub_key TEXT NOT NULL DEFAULT '';
+  `,
+
+  // v18：本条消息是否端到端加密（气泡右下角锁标）
+  `
+  ALTER TABLE messages ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0;
   `
 ]
 

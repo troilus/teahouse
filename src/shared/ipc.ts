@@ -296,6 +296,8 @@ export interface MessageView {
   mentioned?: boolean
   /** 本条消息引用的源消息（仅群聊文本消息携带） */
   replyTo?: string
+  /** 本条消息是否端到端加密（气泡右下角锁标） */
+  encrypted?: boolean
 }
 
 /** 被引用消息的元数据：发送者展示名 + 首行文本摘要 */
