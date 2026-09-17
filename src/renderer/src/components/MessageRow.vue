@@ -13,6 +13,7 @@ import FileCard from './FileCard.vue'
 import ImageBubble from './ImageBubble.vue'
 import PantryIcon from './PantryIcon.vue'
 import PkBubble from './PkBubble.vue'
+import ScreenHistoryCard from './ScreenHistoryCard.vue'
 import { useChatStore } from '../stores/chat'
 import { usePeersStore } from '../stores/peers'
 
@@ -117,13 +118,13 @@ const replyMeta = computed((): ReplyMeta => {
   <div v-if="showSeparator" class="sep">{{ separatorTime(props.msg.ts) }}</div>
   <!-- 文件柜上传提示（决议 #274）带 fileRef，可点开落盘目录；其余系统提示是纯文本 -->
   <button
-    v-if="props.msg.kind === 'system' && props.msg.fileRef"
+    v-if="props.msg.kind === 'system' && !props.msg.screenRef && props.msg.fileRef"
     class="system-line system-action"
     @click="revealSystemTarget"
   >
     {{ messageText(props.msg) }}
   </button>
-  <div v-else-if="props.msg.kind === 'system'" class="system-line">{{ messageText(props.msg) }}</div>
+  <div v-else-if="props.msg.kind === 'system' && !props.msg.screenRef" class="system-line">{{ messageText(props.msg) }}</div>
   <div
     v-else-if="props.msg.status !== 'recalled'"
     :id="`msg-${props.msg.id}`"
@@ -139,8 +140,9 @@ const replyMeta = computed((): ReplyMeta => {
     />
     <span class="message-stack">
       <span v-if="showGroupSender" class="sender">{{ props.senderName }}</span>
+      <ScreenHistoryCard v-if="props.msg.screenRef" :record="props.msg.screenRef" />
       <FileCard
-        v-if="props.msg.kind === 'file'"
+        v-else-if="props.msg.kind === 'file'"
         :msg="props.msg"
         class="message-surface"
         @contextmenu.prevent.stop="openMessageMenu"
@@ -206,7 +208,7 @@ const replyMeta = computed((): ReplyMeta => {
         <span class="reply-quote-text">{{ replyMeta.text }}</span>
       </div>
     </span>
-    <span v-if="props.msg.isMine" class="status">
+    <span v-if="props.msg.isMine && props.msg.kind !== 'system'" class="status">
       <PantryIcon v-if="props.msg.status === 'sending'" class="spin" name="loader" :size="13" />
       <PantryIcon v-else-if="props.msg.status === 'sent'" class="ok" name="check" :size="13" />
       <PantryIcon

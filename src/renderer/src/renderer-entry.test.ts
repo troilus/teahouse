@@ -12,7 +12,8 @@ describe('resolveRendererEntry', () => {
     ['#/capture', 'capture'],
     ['#/capture?peer=node-1', 'capture'],
     ['#/image-viewer', 'image-viewer'],
-    ['#/image-viewer?id=image-1', 'image-viewer']
+    ['#/image-viewer?id=image-1', 'image-viewer'],
+    ['#/remote-view', 'remote-view']
   ] as const)('将 %s 解析为 %s 入口', (hash, expected) => {
     expect(resolveRendererEntry(hash)).toBe(expected)
   })

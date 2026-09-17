@@ -1,0 +1,48 @@
+name: 问题反馈 / Bug report
+description: 描述复现步骤并附上诊断包，帮助定位问题。
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请在出现问题后尽快打开 **设置 → 关于 → 诊断与反馈 → 导出诊断包**，把 ZIP 拖入下方附件区域。
+        诊断包只保存到本机，由你手动上传。默认隐藏网络地址，不含聊天和文件内容。
+        排查网络问题时可勾选“附带真实网络地址”；公开 Issue 的附件可被他人读取，请先确认可以公开。
+        Export from **Settings → About → Diagnostics and feedback** after the problem occurs. Upload the ZIP manually below. For transfer issues, bundles from both peers help.
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题与复现步骤 / Problem and steps
+      description: 发生了什么？预期结果是什么？按什么步骤可以复现？
+      placeholder: |
+        1. …
+        2. …
+        实际结果：…
+        预期结果：…
+    validations:
+      required: true
+  - type: input
+    id: time
+    attributes:
+      label: 发生时间 / Time of occurrence
+      description: 尽量给出日期、时间和时区，以便与日志对照。
+      placeholder: "例如 2026-09-17 14:30，UTC+8"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境信息 / Environment
+      description: 点击“复制环境信息”后粘贴。旧版本请写明应用版本、系统版本与 CPU 架构；传输问题请同时提供双方环境。
+    validations:
+      required: true
+  - type: textarea
+    id: attachments
+    attributes:
+      label: 诊断附件 / Diagnostic attachments
+      description: 将 ZIP 拖到此处。请标明发送端/接收端；如无法提供，说明原因即可。截图请自行遮盖无关内容。
+  - type: textarea
+    id: network
+    attributes:
+      label: 补充说明 / Additional context
+      description: 网络问题请说明同网段/跨网段、是否有 VPN 或网关转发，以及哪一方向成功或失败。截图问题请说明是否使用 Wayland 桌面。

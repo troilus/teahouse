@@ -4,8 +4,8 @@
 
 | Field | Value |
 |---|---|
-| Status | Current for v0.56.2 emoji copy and Linux numpad fixes; Neiwangtong compatibility remains paused by decision #199 |
-| Updated | 2026-09-07 |
+| Status | v0.60.0 local diagnostics implemented (#315); physical remote-view platform acceptance remains pending |
+| Updated | 2026-09-17 |
 | Authority | The [Chinese requirements document](../requirements.md) is the canonical feature and decision record. This document translates the current effective requirements. |
 
 ## 1. Product goals
@@ -32,7 +32,7 @@ Each device is an independent identity. Teahouse has no account system that merg
 
 - Internet messaging, cloud synchronization, cloud storage, or any central server.
 - Mobile clients.
-- Rich-text formatting and video calls. Voice intercom and remote assistance remain future evaluations.
+- Rich-text formatting and video calls. Voice intercom and remote keyboard/mouse control remain future evaluations. Read-only desktop viewing is implemented under #310 (§6.5).
 - Read receipts. Message status ends at delivered (decision #1).
 - Transport encryption. The security model trusts the LAN boundary (decision #5).
 - A server-backed account or organization directory.
@@ -71,6 +71,7 @@ P0 is required for a usable product, P1 is expected for a complete release, and 
 | Updates | Peer-to-peer update discovery and package transfer | P1 | v0.27+, incomplete end-to-end |
 | Settings | Profile, avatar, ports, destinations, theme, shortcuts | P0/P1 | v0.1+ |
 | Application language | Simplified Chinese / English, immediate switching | P1 | v0.57.0 |
+| Screen assistance | One-to-one, per-session consent, Auto/manual 3/5/10 fps | v0.58.0 (#310) | Implemented; physical permission/performance acceptance pending |
 | Documentation language | Simplified Chinese and English | Maintained | v0.51.1 |
 | Compatibility | Neiwangtong compatibility mode | Paused | Unscheduled (#199) |
 | Local API | Optional local automation/AI interface | P2 | Future research |
@@ -133,6 +134,41 @@ The v0.51.1 localization applies to repository and release documentation. Applic
 - Port editing requires an explicit risk confirmation before an individual field unlocks.
 - Peer-to-peer update discovery compares version, platform, and architecture. Package transfer requires explicit user action, exact package naming, a short-lived source-bound grant, SHA-256 integrity, a size limit, and local package-version validation. Applying and restarting remain incomplete on all target paths.
 
+<a id="remote-view"></a>
+
+### 6.5 Remote desktop viewing (#310, v0.58.0)
+
+Source: [Issue #13](https://github.com/skyjt/teahouse/issues/13). The user approved an initial assistance scope: watch a colleague's operations, error messages, and spreadsheets, then guide them through existing chat. Use **low-frame-rate JPEG over the existing TCP listener, in plaintext**, without additional listening ports, servers, WebRTC transport, or native modules. Version **0.58.0** adds the private-chat entry, independent windows, frame transport and runtime role capabilities.
+
+| Requirement | Scope |
+|---|---|
+| F-VIEW-1 | An online private-chat peer confirms the explanation and target before sending a viewing request. The sharer explicitly consents and selects one screen on every session. Receipt alone never starts capture. Requests can be canceled, rejected, or expire; they never enter the offline queue. |
+| F-VIEW-2 | Consent binds one session, viewer, and selected screen. Show both identities and a persistent sharer-side stop action. End invalidates permission; another session needs fresh consent, with no permanent trust or auto-accept. |
+| F-VIEW-3 | One-to-one, one-way, single-screen images only. Auto starts at 10 fps and adapts among 10/5/3 fps (#310), preserving text readability with moderate compression. Reduce achieved fps under load without queuing. The viewer can fit, display received pixels at 100%, and pan locally. Input never controls the remote machine; changing screens requires a new session. |
+| F-VIEW-4 | Stop, close, lock, suspend, quit, capture loss, or disconnection ends the session and releases capture. Network failure uses bounded deadlines. Unlock/recovery never reconnects automatically; clear the image on end. |
+| F-VIEW-5 | One pending or active session per node, regardless of role. Return an explicit busy result. Keep bounded current-frame state; never accumulate historical frames. Chat selection does not change the session, and chat/file transfer remain usable. |
+| F-VIEW-6 | Frames and grants stay in memory, outside messages, transfer records, SQLite, thumbnails, exports, and backups. #312 stores only local lifecycle metadata as system cards; normal chat exports/backups include these records. Log only IDs, dimensions, sizes, timings, and reason enums. Never log pixels, screen titles, or tokens. Plaintext retains the existing LAN trust model and provides no protection against LAN interception or identity spoofing. |
+| F-VIEW-7 | Advertise receiving and sharing separately. Hide the entry for legacy peers; explain unavailable roles/offline state on capable peers. Validate sustained capture on each target platform. Preserve #289's ARM64 Wayland capture guard; receiving is a separate validation candidate. |
+| F-VIEW-8 | Exclude remote input, audio/camera, recording/saving, clipboard sync, remote file drops, multiple viewers, unattended access, reconnect, public-network traversal, and interoperability with other remote-control products. Do not scaffold these features. |
+| F-VIEW-9 (#312) | One persistent private-chat card per legitimate request on each endpoint, updated in place for requests, refusals, cancellations, timeouts and completion. Keep request/start/end timestamps and monotonic connected duration; unknown interruption times remain blank. No duplicate cards, unread increments, forwarding or recall. |
+
+The approved implementation uses an independent window, Auto by default, and manual Economy/Standard/Smooth targets. Shared defaults are a 1600-pixel long edge and JPEG quality 0.60, with the same oversized-frame fallback for every mode. Actual office-text readability and platform performance need target-machine validation. See [UI behavior](ui-design.md#remote-view).
+
+Lock-triggered termination is a release requirement. Electron 22's lock events do not cover Linux; require a readable DDE/UKUI lock state and a live monitor before advertising either role. Lower quality does not resolve the native ARM64 Wayland crash. Wire fields and limits live in [protocol §8.3](protocol.md#remote-view); capture, trial settings, platform gates, and acceptance live in [technical design §3.1](tech-design.md#remote-view).
+
+#### 6.5.1 Frame-rate modes (#310)
+
+The user approved development after the mode proposal: **Auto is the default**, with 10 fps as its initial and maximum target. Changes apply within the current session; every new session resets to Auto.
+
+| Mode | Target | Use |
+|---|---|---|
+| Auto (default) | Start at 10; adapt among 10 / 5 / 3 fps | Reduce based on actual sampling/encoding/network/decoding cycle time, recover after sustained stability |
+| Economy | 3 fps | Older computers, VMs, or heavy concurrent office work |
+| Standard | 5 fps | Errors, settings, and spreadsheets with moderate motion/resource use |
+| Smooth | 10 fps | Follow pointer movement, menus, and scrolling more easily |
+
+All modes share image quality and oversized-frame fallback, changing only request pacing. Manual targets may exceed achieved throughput under load. Auto uses measured full-cycle processing headroom, without CPU-model guesses. Only the viewer changes mode; minimizing temporarily requests 3 fps, restoring resumes the selected mode. No persistent setting or expanded remote permission is added. The canonical Chinese section is requirements §6.11.1.
+
 ## 7. Non-functional requirements
 
 | Area | Requirement |
@@ -179,6 +215,8 @@ The complete append-only ledger is maintained in [requirements.md §9](../requir
 
 ## 9. Open items
 
+- Remote viewing #308/#309: the 10 fps target is agreed. Confirm separate-window versus in-chat presentation, measure quality defaults/actual fps and low-end performance, validate Linux lock signals, and establish the support matrix. Implementation has not started.
+- New proposal: Auto/Economy/Standard/Smooth, with Auto as default and no cross-session memory, awaits product confirmation; automatic thresholds need performance trials.
 - Complete peer-to-peer update package retention, validation, apply/restart, progress, and recovery.
 - Target-platform smoke testing on Win7 x64/ia32, UOS/Debian x64/arm64, and macOS.
 - macOS universal/Intel packaging evaluation.
@@ -194,3 +232,35 @@ Update this document whenever the current functional or non-functional requireme
 ## Decision #307: Application languages (v0.57.0)
 
 Ship Simplified Chinese and English with an immediate, persistent language selector. New installations use Chinese on Chinese systems and English otherwise; existing configurations keep Chinese. Cover every application window, tray, notification and application-owned prompt. Preserve user content and historical system messages. New system messages include local template metadata for rendering in either language. All resources remain offline.
+
+## Decision #308: Remote desktop viewing (2026-09-16, design only)
+
+Split read-only viewing from the earlier remote-assistance evaluation: explicit per-session consent, single-screen low-frame-rate JPEG, existing TCP port, plaintext, persistent stop feedback, and lock/disconnect termination. Document protocol, architecture, UI proposal, failure handling, and validation before implementation. Exact defaults and window presentation remain proposals as stated above. No application code or capabilities change; package version remains **0.57.0**, and a future feature implementation increments the minor version under #53/#73.
+
+## Decision #309: 10 fps target (2026-09-16, design only)
+
+The user requested smoother viewing on the LAN and selected a **10 fps default target**, replacing the initial frame-rate trial proposal. Use a 100ms minimum sampling-start interval and a 5 MiB/s JPEG budget matching 512 KiB × 10 frames. Consume bandwidth on demand. Keep one outstanding frame, backpressure, deadlines, and lower achieved fps when necessary; record actual fps/CPU before claiming support. Quality/resolution remain experimental, and application **v0.57.0** is unchanged.
+
+2026-09-16 proposal supplement: the subsequent discussion adds four frame-rate modes and automatic adaptation as review candidates, separately marked from confirmed #309. Default mode and implementation remain unapproved.
+
+- 2026-09-16, decision #310: v0.58.0 implements view-only remote assistance, independent windows, Auto (10/5/3 fps) and manual Economy/Standard/Smooth modes. Consent, one-frame backpressure, bounded deadlines, lock detection and forced window cleanup are covered by local tests. Physical target-platform permission and performance checks remain pending; this iteration is not a release.
+
+## Review refinement (#311, v0.58.1)
+
+Keep the existing view-only consent flow and four modes. Fix clipped source-selection actions, compact the viewing toolbar and persistent sharing window, reduce redundant image work and capture rate, and make Linux lock detection asynchronous and recoverable. Preserve Electron 22, Node 16, Chrome 108, single-frame backpressure, and separate physical-platform acceptance.
+
+- 2026-09-17, #311: review compatibility, low-end performance and UI; application **0.58.0 → 0.58.1**.
+
+## Assistance interaction refinement (#312)
+
+Decision #312 (v0.59.0): confirm the explanation and target before sending a request. Each legitimate request creates one local system card in each private chat, updated in place through consent, rejection, cancellation, timeout and completion. Connected sessions show start/end times and monotonic duration, excluding invitation waiting. Unfinished records after abnormal exit show interruption with unknown end/duration. Cards carry no screen images, credentials or selected-source metadata; existing chat export/backup includes only these lifecycle records. No unread increments, forwarding or recall.
+
+- 2026-09-17, v2.90, decision #313, application **0.59.1**: align assistance cards like ordinary messages using the persisted initiator (`isMine`): self on the right, peer on the left. Preserve direction through rejection, cancellation, completion and history reload. Reuse existing row layout and spacing; no wire/storage changes. Ordinary system notices remain centered.
+
+- 2026-09-17, v2.91, #314, application **0.59.2**: keep one card on the initiator's side for each session, updating it through request, start and end without appending lifecycle messages. Only a new request creates another card. Show a compact name/status and time/duration summary; keep full timing and reasons in native hover and accessible descriptions. Remove redundant direction text, timing table and normal-session banner, preserving request-failure feedback. No ticking timers, protocol or storage changes.
+
+## Decision #315 — local diagnostics
+
+Version 0.60.0 adds Settings → About → Diagnostics and feedback. Export a local ZIP, copy a redacted environment summary and reveal the saved file. No uploads. Explicit lifecycle/error metadata only; never chat/file/image/clipboard content, credentials or raw error messages. Keep up to seven days and 10 MiB, with bounded asynchronous buffers and repetition suppression. Default node/address aliases; optionally include addresses observed during this run. Preserve evidence of an unclean previous exit. Include a bug-report template and log locations. Native crashes may provide no stack; no memory dumps, continuous monitoring or automatic repair.
+
+- 2026-09-17: Decision #315, application **0.60.0**; diagnostics design recorded before implementation.

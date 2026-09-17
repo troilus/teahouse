@@ -46,6 +46,7 @@ import AvatarCropDialog from './components/AvatarCropDialog.vue'
 import AvatarMark from './components/AvatarMark.vue'
 import PantryBrandLogo from './components/PantryBrandLogo.vue'
 import PantryIcon from './components/PantryIcon.vue'
+import DiagnosticsPanel from './components/DiagnosticsPanel.vue'
 import SettingsNavIcon from './components/SettingsNavIcon.vue'
 import WindowControls from './components/WindowControls.vue'
 import WindowDragStrip from './components/WindowDragStrip.vue'
@@ -1562,6 +1563,7 @@ async function confirmRemove(cidr: string): Promise<void> {
               </div>
             </dl>
           </div>
+          <DiagnosticsPanel />
         </section>
       </template>
     </main>

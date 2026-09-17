@@ -334,7 +334,7 @@ function onMainKeydown(event: KeyboardEvent): void {
   }
   // document / 控件先消费按键；window 上的弹窗处理器可能后注册，因此先保留弹窗优先权。
   const hasPopup = [...document.querySelectorAll<HTMLElement>(
-    '[role="dialog"]:not(.update-pop), [role="menu"], .n-base-select-menu'
+    'dialog[open], [role="dialog"]:not(.update-pop), [role="menu"], .n-base-select-menu'
   )].some((element) => element.getClientRects().length > 0)
   if (showGroupCreator.value || hasPopup) return
   event.preventDefault()

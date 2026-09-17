@@ -4,8 +4,8 @@
 
 | |                                                                                                                                                                                                              |
 |---|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 状态 | v1.77；emoji 复制与 Linux 小键盘兼容（决议 #306）；v0.56.2 |
-| 日期 | 2026-09-07                                                                                                                                                                                                   |
+| 状态 | v1.84；v0.60.0 本地诊断与日志导出（#315），目标机权限/性能待实测 |
+| 日期 | 2026-09-17 |
 | 关系 | 上游：[requirements.md](requirements.md)（功能）、[protocol.md](protocol.md)（协议）、[ui-design.md](ui-design.md)（界面）；硬约束：根 README「开发红线」（Electron 22.3.27 / Chrome 108 / Node 16.17 焊死） |
 
 ## 1. 选型决策总表
@@ -134,7 +134,7 @@ src/
 ├─ preload/index.ts        # contextBridge 暴露 window.pantry（按 shared/ipc.ts 类型）
 └─ renderer/
    ├─ main.ts              # 公共轻量 bootstrap：解析 hash 后异步加载根组件
-   ├─ renderer-entry.ts    # main / settings / capture / image-viewer 动态入口映射
+   ├─ renderer-entry.ts    # main / settings / capture / image-viewer / remote-view 动态入口映射
    ├─ App.vue              # 主窗口三栏壳
    ├─ SettingsApp.vue      # 设置窗口根组件
    ├─ CaptureApp.vue       # 截图窗口根组件
@@ -149,7 +149,7 @@ src/
 
 分层铁律：renderer 永不直接碰网络/磁盘/DB——一切经 IPC；main 的 `services/` 是用例编排层，`net/`、`store/` 互不感知，由 service 串联。
 
-渲染入口性能边界（决议 #210）：四类窗口继续共用单个 `index.html` 和 hash 路由，公共 bootstrap 只静态加载 Vue、Pinia、入口解析与基础 token；各根组件通过动态 import 形成独立 chunk，生产构建使用 esbuild 压缩。Vite manifest 进入构建产物，`scripts/check-renderer-bundles.mjs` 在每次 `npm run build` 后确认四个动态入口均可达且文件互异，并把入口及其静态依赖闭包限制在 200 KiB。OCR 结果缓存使用 16 项 LRU；PaddleOCR 服务初始化 Promise 失败后清空，后续识别可以重新初始化。
+渲染入口性能边界（决议 #210）：五类窗口继续共用单个 `index.html` 和 hash 路由，公共 bootstrap 只静态加载 Vue、Pinia、入口解析与基础 token；各根组件通过动态 import 形成独立 chunk，生产构建使用 esbuild 压缩。Vite manifest 进入构建产物，`scripts/check-renderer-bundles.mjs` 在每次 `npm run build` 后确认五个动态入口均可达且文件互异，并把入口及其静态依赖闭包限制在 200 KiB。OCR 结果缓存使用 16 项 LRU；PaddleOCR 服务初始化 Promise 失败后清空，后续识别可以重新初始化。
 
 截图初始化时序（决议 #218/#221）：截图窗 preload 在页面脚本和动态根组件之前订阅 `capture:init`，以窗口生命周期内存缓存最近一次 PNG `ArrayBuffer`；`CaptureApp` 挂载后通过 `window.pantry.onCaptureInit` 订阅时同步回放，覆盖主进程 `did-finish-load` 已发送、renderer 动态 import 尚未完成的竞态。缓存只存在截图窗口进程内，不落盘、不写日志、不跨窗口共享；PNG 字节通过本地 Blob URL 解码，避免 data URL 的 base64 体积与字符串复制开销。BrowserWindow 加载底色固定为黑色，防止截图根挂载前显示应用全局茶青背景。
 
@@ -162,6 +162,127 @@ src/
 截图按钮提示（决议 #267）：按钮通过 `data-tooltip` 提供中文提示文案，`::after` 绘制气泡、`::before` 绘制方向箭头，悬停与 `focus-visible` 只切换 opacity / transform / visibility，不触发布局回流。`toolbarTooltipBelow` 根据既有工具条定位结果判断 `top < 48`，通过 `.tooltip-below` 翻转提示方向；移除原生 `title` 以防双层提示，保留 `aria-label` / `aria-pressed`。实现仅使用 Chrome 108 支持的属性选择、伪元素和 transition，不新增 DOM 浮层、依赖、IPC 或平台分支。
 
 远期预留（决议 #21）：将来的本地 AI 开放接口（`local-api/`，HTTP/WS 或 MCP 服务器）将作为与 `ipc/` **并列的第二个"前台"**，复用同一 `services/` 层——界面能做的（查消息、发消息、订阅事件），接口天然也能做，不需要改动业务层。当前版本不实现，但任何人不得把业务逻辑写进 `ipc/` 层（会堵死这个口子）。
+
+<a id="remote-view"></a>
+
+### 3.1 远程桌面查看的实现（决议 #310，v0.58.0）
+
+范围见 requirements §6.11，线上格式与硬预算唯一来源为 protocol §8.3，界面见 ui-design §7.9。采用 Electron 22 自带桌面媒体采集、浏览器 Canvas JPEG 编码、主进程既有 TCP 监听器传输；不升级运行时，不增加依赖、常驻服务或新的监听端口。
+
+#### 3.1.1 复用点与新增职责
+
+| 位置 | 职责与边界 |
+|---|---|
+| `shared/protocol.ts`、`net/codec.ts`、`net/frame.ts` | 将 protocol §8.3 转成常量/类型及精确白名单；复用现有帧读取器，新增屏幕帧所需 raw 段，旧文件/消息帧保持。 |
+| `net/transfer.ts`、`net/screen-stream.ts` | 既有监听器按首帧交给屏幕连接处理器，监听器仍负责总连接预算与 stop 清理；屏幕处理器负责按需取帧、期限/背压和 JPEG 字节，不感知 Electron、存储或 UI，不另起文件传输任务。 |
+| `net/messenger.ts` 与装配 | 复用不入队的控制发送；屏幕控制入口补实际 IP 元数据，TCP 回退也必须携带来源；过期协助不经聊天离线队列补发。 |
+| `services/remote-view.ts` | 持有权威会话、角色/对端/选屏授权、代次、状态与终止缓存，调度采样及资源回收；只通过注入函数访问窗口/采集宿主，保持零 Electron。 |
+| `windows/remote-view-window.ts` | 管理本地独立受限窗口；装配系统采集授权、锁屏/休眠与销毁信号。查看/共享角色都不得影响主窗聊天生命周期。 |
+| `shared/ipc.ts`、`preload` | 按角色/窗口限定的请求、响应及字节传递；handler 只校验和转发，业务在服务层。 |
+| `RemoteViewApp.vue` 与 `#/remote-view` 动态入口 | 同一独立窗口根组件按本地主进程授予的角色展示选屏/共享状态或接收画面；包含本地采样与编码，不访问 Node/Electron 或外部 URL。 |
+| `shared/image-metadata.ts` | 复用 `inspectImageMetadata` 校验 JPEG 真实尺寸/类型；不再写一套图片解析器。 |
+
+上述路径已实现。第五个动态根 `RemoteViewApp` 的构建预算为 JS 128 KiB / CSS 16 KiB，四个既有根及 200 KiB 公共启动预算保持。协议层复用图像解析与 FrameReader；不新增依赖、库表或监听端口。
+
+**本地协助记录（#312）**：服务仅在生命周期变化时发出 history 事件，装配交给 ChatService。复用 `messages.kind=system` 与 `file_ref.screen` 版本化元数据，以对端+sessionId 确定消息 ID，保留可读中文回退文本，无新表/迁移、无线协议变化。拒绝忙碌/能力不足的有效入站请求也记录；去重与限流仍先执行。开始时间以本机连接就绪为准，持续时间用单调时钟，只在结束时计算；各端按本机观察记账，不比较两台机器时钟。请求/开始/结束展示时间来自本机时间。已结束卡片不接受迟到状态回退；先清理采集宿主，再持久化。更新通过独立消息更新事件原位合并，避免重复消息通知、未读或滚动；仅新卡片沿用系统消息事件。删除聊天后不因迟到状态重新创建记录。启动时和备份导入时把未完成卡片改为中断，结束时间/时长留空；不设每秒写库/计时器。JSON 解析校验格式与数值，坏记录回退文本。帧字节、token、选屏名称/源 ID 永不持久化。共享窗口改为无透明效果的自绘标题区，复用同一窗口/媒体流，准备时贴已选屏工作区右上角，320×56 DIP；显示参数变化后重新定位。
+
+#### 3.1.2 采集与主进程授权
+
+1. 请求到达仅展示身份与同意/拒绝；用户进入选屏后才枚举 `screen` 源与本地缩略图。禁止把源 ID、缩略图、屏幕名称发给远端。选屏和系统权限等待均受请求期限控制。
+2. 主进程将「当前会话 + 受限窗口 webContents + 本地选择的 source」绑定。使用 Electron 22 的 `setDisplayMediaRequestHandler` 配合 `getDisplayMedia({audio:false,video:...})`；仅向已获本次本地确认的窗口授予已选择的屏幕。独立内存 session 的 permission check 默认拒绝；实测 Electron 22 的显示媒体 permission request 为 `media` 且 `mediaTypes=[]`，仅为当前 preparing 角色、已选源、当前主 frame 放行一次，随后 display handler 消费选屏授权。摄像头/麦克风有非空类型并拒绝，无关窗口也拒绝。
+3. 一个会话只创建一个桌面流，width/height 均设 1600 的最大约束，避免 4K 帧进入本地编码前继续维持高分辨率。在本地 renderer 中把视频采样到一个有界 Canvas，用 `toBlob('image/jpeg', quality)` 异步压缩，交由 main 校验再发送。**不循环调用 `desktopCapturer.getSources` 制作全屏缩略图，不在主进程逐帧编码，不把 MediaStream 通过 IPC 克隆。**
+4. 每次有效 next 才采样；前一编码/写出未结束时不启动下一次。迟到编码回调检查会话代次后丢弃。源分辨率/缩放变化时重新计算等比目标尺寸；原屏幕移除或 track ended 就结束，禁止自动切到另一块屏幕。
+5. viewer 主进程在分配、IPC 发送与解码前完成 protocol §8.3 校验；renderer 仅处理本地 JPEG 字节，用 createImageBitmap 解码并核对尺寸，通过 bitmaprenderer 交接位图所有权；该上下文不可用时回退 Canvas 2D，finally 显式 close 位图。只保留当前画布和一个在途位图，不产生逐帧 Blob URL/HTML 图片缓存。放大只能放大收到的像素，不能恢复压缩丢失的文字细节。
+
+保持 sandbox/contextIsolation、无 Node integration、导航拦截和严格 CSP。远端只提供有界 JPEG 字节，不作为页面、脚本或 URL 加载；接收画面使用本地 Blob 解码和 Canvas 显示，禁止添加 `http:`、`https:` 或通配来源。位图交接遵循 [transferFromImageBitmap 的所有权规则](https://developer.mozilla.org/en-US/docs/Web/API/ImageBitmapRenderingContext/transferFromImageBitmap)。`video.srcObject` 已在真实 Electron 合成源验证，无须扩大现有 CSP。
+
+官方依据：[Electron 22 桌面采集](https://github.com/electron/electron/blob/v22.3.27/docs/api/desktop-capturer.md)、[显示媒体请求处理](https://github.com/electron/electron/blob/v22.3.27/docs/api/session.md#sessetdisplaymediarequesthandlerhandler)。接口存在不等于目标桌面持续采集已通过。
+
+#### 3.1.3 当前参数与负载
+
+**默认自动、10 帧起始目标以及三个手动档已确定并实现（#310）**。以下尺寸与 JPEG 质量为当前默认，合成办公画面已检查；目标机真实应用的可读性与负载仍待复测。线上硬上限以 protocol §8.3.4 为准。
+
+| 项目 | 当前值 | 调整原则 |
+|---|---|---|
+| 采样节奏 | 自动 10/5/3 帧；手动 3/5/10 帧 | 相邻采样开始最短 100ms；受整帧消费速度及字节预算约束，负载不足时降帧，不补发积压帧 |
+| 输出尺寸 | 长边最多 1600 像素，等比缩放、不放大小屏幕 | 先用真实报错/菜单/表格检验可读性；另测 1280 与 1920，竖屏同样受像素上限约束 |
+| JPEG 质量 | 0.60 | 结合文字和单帧大小调整，不能以明显糊字换取名义帧率 |
+| 超大编码结果 | 最多 2 次重试：质量 0.50；仍超限再将长边减至最多 1280 | 每次保留原始帧期限；仍超过字节上限则结束并给出采集失败原因，不发超限帧 |
+| 驻留资源 | 每端一个视频/Canvas（共享角色）、一个编码任务、一个收发帧、一个当前显示图 | 不建历史帧队列、磁盘缓存、差分图块、额外压缩工作池或录像管线 |
+
+限速调度按「上次采样开始 + 100ms」计算可开始时间，上一轮耗时已占用的间隔不再重复等待。字节预算为 JPEG 载荷最多 5 MiB/秒（512 KiB × 10），仅按实际帧大小消耗；普通办公画面的带宽以实测为准。提高目标帧率后须重测源端编码与接收端解码/IPC 的 CPU 开销，不能仅以纯内网条件推断能稳定达到 10 帧。
+
+**自动/手动档位（已实现，阈值仍须目标机校准）**：复用查看端 `screen-next` 的请求节奏即可切换 3/5/10 帧目标，不新增线上帧字段、不重连、不重新采集或申请权限。模式只在本次查看会话内保存；本地 IPC `screen:set-mode(sessionId, mode)` 仅允许该会话的查看窗口调用，`mode` 白名单为 `auto/economy/standard/smooth`。
+
+- 查看端 main 从实际发出 next 到收到 `screen:consumed` 计整轮耗时，涵盖对端采样/编码、网络、本端校验/解码与 IPC；排除请求发出前主动等待的限速时间。使用实际处理余量，不采集 CPU 型号、不增加跨机 CPU 遥测。
+- 自动从 10 帧起步；降档规则为连续 3 帧耗时超过当前周期的 80%，按 10→5→3 降一级。降档后至少 10 秒禁止升档；耗时连续 10 秒低于下一更快档周期的 60% 时，仅试升一级。升档后若再次变慢，仍按同一降档规则处理；阈值需要目标机验证后回写。
+- 手动档只改变 next 的目标周期；每轮最多一个请求，始终受共享端 100ms 硬上限和字节预算约束。切模式不取消在途帧，下一次请求使用新周期并重置自动计数。慢到低于 3 帧时由背压自然进一步降速；超过既有期限仍结束会话。
+- 自动保持图像尺寸与 JPEG 质量。#311 在本地采样入口按实际请求间隔同步约束媒体 track：连续 3 次间隔 ≥160ms / ≥280ms 后降到 5 / 3 帧，间隔恢复时立即提高，最多 10 帧；只在档位变化时 applyConstraints，失败则保留已可用采集，不重复申请权限。该有界启发式不增加线上字段或 CPU 遥测，底层是否减少原生抓屏开销仍须目标机实测。
+- 自动档验收：注入慢编码/慢解码/网络抖动，验证降档、恢复升档与 10 秒冷却，无档位频繁往返；手动模式不自动改档，切换不重连且图像尺寸/质量保持。阈值和防抖通过确定性测试；目标机吞吐仍须单独记录。
+
+后台生命周期不能依赖主窗是否隐藏或当前聊天。独立协助窗口按需关闭 background throttling，使用有上限的定时/请求调度；仅该会话存活时启用，保留 Win7/Linux 禁硬件加速策略。查看窗最小化仍按低帧率接收，恢复时看到最新画面，不为首版增加暂停/恢复协议。主动结束或关闭协助窗必须销毁采集宿主，避免 renderer 未响应时仍持有屏幕 track。
+
+#### 3.1.4 状态、IPC 与清理
+
+权威状态：`idle → requesting/awaiting-consent → preparing/connecting → active → ended`；角色固定为 viewer 或 sharer，每个节点最多一个非终态会话。阶段推进时取消前一阶段的等待计时器，不能让邀请超时误杀已连接会话。拒绝、取消、超时和失败直接进入 ended；ended 清除字节和凭据，保留终态元数据供私聊反馈，下一请求替换会话。不得根据 renderer 自报 active 授权网络端点。
+
+| IPC | 调用方/作用 |
+|---|---|
+| `screen:request(peerId)` | 主窗口发起；main 复核在线、能力、忙碌与限流 |
+| `screen:sources(sessionId)` | 仅当前共享端选屏窗口；本地用户已打开确认流程才枚举 |
+| `screen:respond(sessionId, accepted, sourceId?)` | 仅当前共享端窗口；sourceId 必须属于本次枚举，拒绝时不得包含 sourceId |
+| `screen:ready(sessionId)` / `screen:fail(sessionId, reason)` | 共享窗口报告采集准备/失败；查看窗口订阅完成后报告 ready，main 才交付缓存在内存中的第一帧，防动态入口加载竞态 |
+| `screen:availability()` / `screen:set-mode(sessionId, mode)` | 相关窗口读取能力；仅当前查看窗口可切换帧率模式 |
+| `screen:stop(sessionId)` | 当前会话相关窗口或本机共享停止入口；幂等，无须等待网络 |
+| `screen:state` / `screen:get-state()` | 相关窗口状态投影；加载先订阅再取快照，用代次避免 ready 事件丢失或旧快照覆盖 |
+| `screen:sample` → `screen:frame(sessionId, seq, bytes)` | main 按网络需求调度当前采集窗口；接收的 bytes 再校验，禁止其他窗口提交帧 |
+| `screen:image` → `screen:consumed(sessionId, seq)` | main 给当前查看窗口一帧；校验/解码/DOM 替换完成才回应，main 再准许下一次 next |
+
+IPC 名称和准确 TS 契约在 `shared/ipc.ts`，会话投影类型在 `shared/remote-view.ts`。权限凭据只在主进程传递，不放 URL、renderer 状态或日志。无新增库表、配置开关或长期授权记录。
+
+停止入口统一清理：作废代次和凭据 → 停止接受 next/输出画面 → 销毁 socket → 停止 track、移除 srcObject、释放 Canvas/Blob/缓冲区和定时器 → 销毁采集宿主 → 推送终态。重复结束安全，任意 await 后都复核代次；主进程处理 close/render-process-gone/before-quit，不能依赖 renderer 自己卸载。拒绝/未同意路径也验证零残留采集。
+
+#### 3.1.5 平台关卡
+
+| 环境 | 待验证项/当前边界 |
+|---|---|
+| Win7 SP1 x64 / ia32 | 保持软渲染；分别测持续采集、CPU/内存、DPI、锁屏与虚拟机显示变化；x64 通过不能替代 ia32 |
+| Win10/11 | 授权流程、DPI/多屏、锁屏、窗口最小化；系统安全桌面/受保护内容不可读时结束或明确失败 |
+| UOS/Kylin X11，x64 / arm64 | 分别测采集和桌面锁屏信号；截图成功不能替代持续帧验收 |
+| Linux x64 Wayland | portal/PipeWire、选屏取消、重复授权、断流与锁屏逐环境验证，通过前不宣称发屏可用 |
+| Linux ARM64 Wayland | 继续在屏幕枚举前阻止发屏（#289）；只收屏是独立验证候选，不因降画质解除保护 |
+| macOS arm64 | 系统屏幕录制权限允许/拒绝、撤销后的表现、锁屏/休眠和多屏变化 |
+
+Electron 22 的 `powerMonitor` `lock-screen`/`unlock-screen` 事件仅标注 Windows/macOS；`getSystemIdleState` 的 locked 也只在支持的系统可用，不能把 idle/unknown 当作锁屏或已解锁。[版本对应文档](https://github.com/electron/electron/blob/v22.3.27/docs/api/power-monitor.md)
+
+Linux 首版使用现有系统 `gdbus` 读取并监听 DDE 的 `com.deepin.SessionManager.Locked`，或 UKUI 的 `org.ukui.ScreenSaver.GetLockState` / `lock` / `unlock`。同时适配新版 `org.deepin.dde.SessionManager1.Locked`（[接口](https://github.com/linuxdeepin/dde-session/blob/master/dbus/adaptor/org.deepin.dde.SessionManager1.xml)）。启动异步验证方法与 monitor 名称归属，不阻塞聊天；邀请/接受前刷新状态。会话期间信号与 5 秒复核并行，闲置时 60 秒复核，忽略无关属性信号；监控失效或桌面服务晚启动时每 60 秒重新检测，恢复只重新声明能力，不恢复旧会话，命令超时、未知返回、服务消失或监控退出均终止并禁用能力。不安装系统工具，不用 idle 猜锁屏。缺少可用接口的桌面不广播远程查看能力；ARM64 Wayland 无论锁屏检测结果如何均不发屏。Win/mac 使用原生锁屏/休眠信号。实际 UOS/麒麟系统仍须目标机复核。
+
+依据：[DDE 5.8.17 的 Locked 属性](https://github.com/linuxdeepin/startdde/blob/5.8.17/session.go)、[DDE 服务名](https://github.com/linuxdeepin/startdde/blob/5.8.17/session_stub.go)、[UKUI 锁屏接口](https://github.com/ukui/ukui-screensaver/blob/master/src/org.ukui.ScreenSaver.xml)。UKUI 的对象路径为 `/`，以[上游常量](https://github.com/ukui/ukui-screensaver/blob/master/src/types.h)为准；查询结果不能覆盖查询发出后收到的新锁屏信号。
+
+结束时主进程销毁协助窗口（包括采集宿主），聊天页显示终态原因；不能依赖未响应的 renderer 自己停止 track。网络 next/frame 的绝对期限、实际来源绑定、IPC 窗口/角色校验都在 main 执行。媒体使用独立内存 session，显示媒体授权仅一次绑定本地已选屏幕，不允许摄像头/麦克风。
+
+能力须在 UDP/TCP 启动成功、锁屏检测可用后声明；请求/同意刷新状态，建连复核状态。锁屏/休眠结束现有会话，恢复后仍需新请求。
+
+#### 3.1.6 验证与目标机验收
+
+1. **采集验证**：在隔离实例完成选屏、权限、持续采样、锁屏与停止；实测源端鼠标指针是否包含在画面，缺失时登记待确认，不能声称完整显示操作。记录源分辨率/DPI、CPU/GPU/VM 配置与桌面会话类型。
+2. **协议与服务验证**：用合成 JPEG 走 `127.0.0.1`、`broadcastTargets: []`，覆盖 request→accept→open→next→JPEG→stop，以及拒绝/超时、双向同时邀请、取消先到、迟到 accept、重复 token、错误来源/角色/seq、越界尺寸/长度、JPEG 不匹配、截断/慢流、背压、渲染端不消费、断网和退出。兼测文件传输与聊天，证明不占文件供流槽或污染现有字节流。
+3. **界面和目标机联调**：按 ui-design §7.9 验证独立窗口，验证键盘可达、焦点、双语、最小尺寸/缩放、共享停止入口始终可见，保留已有四入口检查并增加第五入口预算。交付前执行仓库五连验证；真实双机/跨网段和桌面权限结果单独记录。
+
+| 验收项 | 通过要求或记录方式 |
+|---|---|
+| 同意与停止 | 未同意/拒绝/过期绝不发送画面；停止/锁屏后不再发送新帧，接收方清空当前图；恢复后不自动重连 |
+| 内容可读 | 使用目标办公软件真实菜单、报错和表格，以接收的 100% 图像检查可读性；不能仅用彩色测试图验收 |
+| 帧率与延迟 | 默认按 10 帧/秒目标运行，记录实际接收帧率、连续滚动时的降帧原因及同屏计时器的端到端 p50/p95、首次画面等待；普通有线 LAN 的试验目标为首帧 ≤3 秒（采集准备完成后）、p95 ≤1.5 秒。无法达标的目标机如实登记，确认支持范围前不宣称稳定 10 帧 |
+| 负载与寿命 | 连续运行至少 10 分钟、开始/结束至少 30 次；记录两端 CPU/内存与实际带宽，结束后无残留 socket/track/定时器，内存无逐轮持续增长；低配机预算根据试验结果确认 |
+| 慢网 | 帧率降低且无不断增长的帧队列；超过整帧期限转终态，显示失败原因 |
+| 回归与网络边界 | 协助期间聊天可操作、文件可继续传输；运行期间无外网 DNS/连接与新增监听端口；仅同意的内网对端收到数据 |
+
+本地验证入口：`npm test`（协议/状态/慢流/30 次服务会话清理/Linux 锁状态模拟）、`npm run test:db`、`npm run typecheck`、`npm run build`、`npm run smoke`。先 build，再执行 `npm run test:screen`，以真实 Electron 22、真实主窗/IPC/TCP 和本地合成办公页面验证查看、逐次同意、实际媒体流/Canvas 编码、四档切换、聊天共存及锁屏销毁；使用 `PANTRY_SCREEN_TEST_MS=600000 npm run test:screen` 做 10 分钟运行。测试强制绑定/发送 `127.0.0.1`，无广播、无需采集用户桌面。
+
+**2026-09-16 本地结果**：120 个测试文件、776 项测试通过；真实 Electron ABI 数据库自测、类型检查、构建与启动冒烟均通过。macOS 合成页面查看连续 600,169ms，平均约 9.45 帧/秒；反向 `getDisplayMedia` → Canvas → IPC → TCP → 解码至少 5 帧后锁屏终止通过。补测中英文/深色即时切换、480×360 查看窗、适应/100%、慢帧提示与恢复均通过。该帧率来自本机回环、合成页面供帧，不能外推为 Win7/UOS 的实测吞吐。
+
+**验证边界**：合成源替换桌面枚举及系统许可结果，不能证明物理屏幕权限、指针、多屏/DPI、真实锁屏桌面和 Win7/UOS/麒麟性能。30 次自动服务测试也不等同 30 次真机采集寿命测试。上表的目标机 CPU/内存、真实带宽和 p50/p95 仍需双机实测；不得据构建或回环成功扩大支持结论。
 
 ## 4. IPC 契约（摘要）
 
@@ -580,3 +701,32 @@ Chromium 108 的 [GTK 事件转换](https://raw.githubusercontent.com/chromium/c
 新系统提示在既有 messages.file_ref 中追加带版本的 system 元数据（白名单模板 + 受限参数），content 继续保存中文回退文本；无新增表列、无需历史迁移。消息与会话摘要投影携带可选 systemRef，旧记录无元数据时显示原文，导出保持可读文本，备份保留元数据。用户名称参数与表示本机用户/匿名用户的标记分开，避免误翻译恰好同名的用户。线上协议 v0.50 与 SQLite v14 保持。
 
 - 2026-09-09 v1.78 决议 #307：增加本地语言配置、响应式词典与结构化系统提示，版本 **0.56.2 → 0.57.0**。
+
+- 2026-09-16 v1.79 决议 #308（仅文档）：新增 §3.1，定义远程桌面查看的分层、受限采集/IPC、低帧率试验参数、清理与平台/验收关卡。画面传输复用既有 TCP 监听器，代码尚未实现，应用保持 **v0.57.0**。
+
+- 2026-09-16 v1.80 决议 #309（仅文档）：将默认目标确定为 10 帧/秒，细化 100ms 采样调度、5 MiB/秒 JPEG 预算和实际帧率/CPU 验收；保留单帧在途与降帧策略，应用保持 **v0.57.0**。
+
+- 2026-09-16 方案补充（待确认）：补充复用 next 节奏的自动/3/5/10 档位候选、耗时判断与防抖规则；不增加线上字段，默认模式和算法阈值仍待确认/验证。
+
+- 2026-09-16 v1.81 决议 #310：实现独立窗口采集/查看、屏幕会话编排、既有 TCP 监听器分流、单帧节流与自动档；一次性选屏、内存媒体 session、Linux DDE/UKUI 锁屏检测、第一帧就绪交接与主进程强制销毁均已接入。增加第五动态根预算和回环/Electron 自测，应用 **0.58.0**。
+
+- 2026-09-17 v1.82 决议 #311：原生位图交接与显式释放，约束媒体流尺寸/帧率；修复等待阶段最小化状态丢失、Linux 检测阻塞启动和检测失效后不可恢复，闲置复核降为 60 秒，补新版 DDE。协议不变，无新增依赖，应用 **0.58.1**。
+
+本轮本地验证：**121 个测试文件 / 790 测试**、Electron ABI 数据库自测、类型检查、构建、启动 smoke 与版本一致性通过。实际 Electron 软渲染合成测试验证原生位图和强制 Canvas 2D 回退；120 秒查看约 **9.30 帧/秒**。同机 30 秒对照中查看进程 CPU 指标 **2.053% → 0.757%**、工作集 **645 → 188 MiB**，这是本机样本，不外推目标平台。采集端动态 10/5/3/10 约束、高分辨率输出、约束失败回退及锁屏清理通过；Win7/UOS/麒麟/macOS 物理权限、DPI 与长期内存仍待目标机验证。
+
+- 2026-09-17 v1.83 决议 #312：复用系统消息保存协助生命周期，单调计时、原位消息更新与启动中断自愈；无新依赖、库表或协议字段；应用 **0.59.0**。
+
+### 本地诊断（决议 #315）
+
+- 主进程 `DiagnosticsService` 接收显式白名单事件，不接管 console、不序列化业务对象；仅从 Chromium 未捕获异常通知提取固定错误类型/行号。只保留受限枚举、数值、操作 ID、匿名节点/地址及安全错误类型/错误码/堆栈位置；丢弃 Error.message、文件名/路径、昵称、报文及环境变量全集。IP/节点使用本机持久随机盐匿名化（启动时同步限读 65 字节，避免早期事件与导出快照使用不同盐）；操作 UUID 保留供两端对照。
+- `userData/logs` 存每日 JSONL；7 天/10 MiB 双限，分片不超过 1 MiB。写入串行异步批处理，缓冲最多 256 KiB、单条 2 KiB；重复相同事件短窗合并计数、溢出记丢弃计数。无闲置轮询。日志故障不影响业务，保留受限内存记录并在摘要注明。
+- 单实例锁后初始化日志及本次运行标记；检查上一标记判断未正常退出，正常退出限时等待 flush 和正在执行的导出后清理标记，失败保留标记。不吞掉未捕获异常；主进程异常监视及窗口/子进程退出记录仅安全元数据。捕获操作开始记录落盘后再进入可能原生崩溃的枚举调用。
+- 文件接收记录连接、拉取、校验/写入失败和结束，保留错误码与阶段；发送侧记录供流结束/断开。状态更新时写摘要，不写高频进度；屏幕协助只记生命周期，截图记录阶段与失败码。
+- 环境从应用自身采集：版本/运行时、OS/架构、Linux 发行版与会话类型/桌面白名单、显示尺寸/缩放、软渲染、只读权限状态、UDP/TCP 监听结果及数据库模式。禁止触发截图授权/Portal 探测或扫描网络。只记录已知状态，未知明确标注。
+- IPC 仅校验和转发，导出/复制业务集中服务，文件对话框/剪贴板由主进程适配。ZIP 在 Node Worker 中复用 `zip-store`，无新增依赖；只读取日志目录中固定格式的普通文件，限大小/数量，拒绝符号链接；临时 ZIP 与目标同目录，成功后原子替换，失败清理临时文件；并发导出只允许一次，超时终止 Worker。
+- 导出含 `summary.txt`、`environment.json`、`logs/*.jsonl`。勾选网络详情时另附本次运行已观察到的 IPv4 地址映射（不含 MAC/主机名），上次运行的匿名地址不保证可还原。导出与复制默认脱敏；“打开所在文件夹”只使用服务保存的最后成功路径，不接受任意渲染层路径。
+- Node 16.17 Worker/标准库即可覆盖 Win7、UOS/麒麟 x64/ARM64；不加 native 模块。无数据库迁移、线上协议变更或外网调用。测试覆盖脱敏/截断/轮转/异常标记/磁盘失败、回环传输错误阶段、真实 Electron IPC/Worker/设置明暗布局；目标硬件性能与权限仍需真机验收。
+
+- 2026-09-17 v1.84 决议 #315：明确日志白名单、异步预算、异常退出标记、后台 ZIP 与离线跨平台边界；应用 **0.60.0**。
+
+本轮验证：123 个测试文件 / 801 测试、Electron ABI 数据库、类型、构建、隔离 smoke 全通过；新增 `npm run test:diagnostics` 验证真实 Electron 22 的 IPC/Worker、脱敏附件、磁盘失败、异常重启及设置明暗/英文 125%。约 9 MiB 模拟日志后台导出 221 ms、主线程最大心跳间隔 17 ms（仅本机样本）；屏幕协助合成回归通过。无新增依赖/迁移/线上协议改动，Win7/UOS/麒麟真机验收仍保留。

@@ -58,6 +58,7 @@ Moving a file or sending a short message inside an office network should be effo
 - **Shared file cabinet (third main tab)** — Built natively into the third tab of the main window; publish a local folder with configurable global permissions (disabled, read-only, read-write) and granular per-peer grants; browse colleagues' shared cabinets with breadcrumb navigation and pagination; multi-select download and save-as; drag-and-drop upload of files or folders into dedicated subdirectories to avoid overwriting existing data; aggregate recent upload activity.
 - **Standalone image viewer & offline OCR** — Independent image viewer with smooth zooming, double-click mouse-anchored zooming, rotation, and window centering; browse chat image history seamlessly using previous/next navigation buttons; built-in PaddleOCR (PP-OCRv6 tiny + onnxruntime-web WASM) fully offline text recognition engine; directly select, drag across lines, and copy text on top of the original image, plus one-click copy of all recognized text; session-level in-memory caching restores the text selection layer instantly.
 - **Built-in screenshot utility** — One-key global shortcut capture; rectangular selection, pencil, arrows, mosaic, and in-place single-line text annotations; includes a magnifier and coordinate/color inspector; compatible with Linux Wayland and X11 environments.
+- **View-only screen assistance** — Request from a private chat; the peer consents and selects a screen each time. An independent viewer provides Auto and 3/5/10 fps modes with immediate stop. Plaintext LAN transport; local loopback and synthetic Electron capture are validated, while physical-screen permissions and target performance remain pending. See [technical boundaries](docs/en/tech-design.md#remote-view).
 - **Local history & full-text search** — Powered by SQLite WAL mode and FTS full-text index; quickly search contacts, groups, and message history globally or filter within a specific chat; supports local backup export and device migration.
 - **Bilingual interface switching** — Native support for Simplified Chinese and English; switch instantly across all active windows via Settings → General → Language; fresh installations initialize automatically based on system locale.
 - **LAN security boundary** — Globally appends `--no-proxy-server` at startup to bypass any system or environment proxies; zero external network requests, zero telemetry, and zero remote CDN dependencies; context isolation and Chromium sandboxing enabled in renderers; strict network packet allowlist validation; destination path traversal sanitization; inline chat images bounded to ≤8192px and ≤32 megapixels; strict log sanitization keeping message bodies and file contents out of logs.
@@ -158,3 +159,20 @@ Standard renderer controls use [Naive UI](https://github.com/tusen-ai/naive-ui) 
 Copyright © 2026 skyjt.
 
 Starting with version 0.37.0, Teahouse source code and binary distributions are licensed under the [GNU General Public License v3.0 only](LICENSE), SPDX identifier `GPL-3.0-only`. MIT rights granted for version 0.36.8 and earlier remain valid. Third-party components and artwork retain the licenses listed in [Third-party notices](THIRD_PARTY_NOTICES.en.md).
+
+
+## Diagnostics and feedback (since v0.60.0)
+
+After a problem, open **Settings → About → Diagnostics and feedback → Export diagnostics**, save a local ZIP and attach it to your Issue manually. **Copy environment info** supplies a redacted summary. Include the time, steps and expected result; for file/image issues, export from both peers and label sender/receiver.
+
+Bundles include versions, OS/architecture/session details, known listener/permission status and recent events. Logs retain up to **seven days and 10 MiB**, excluding chat text, filenames/file contents, screen images, clipboard contents, credentials and raw error messages. Nodes and addresses are aliased by default. The unchecked **Include real network addresses** option adds addresses observed during this run only; confirm they can be shared before posting public attachments. Copied information always stays redacted. The app never uploads or contacts an external service.
+
+If the app cannot open, retrieve `.jsonl` files from `logs`, not the complete data directory, database or `identity-salt`:
+
+| Platform | Default log location |
+|---|---|
+| Windows | `%APPDATA%\茶话间\logs` |
+| Linux / UOS / Kylin | `${XDG_CONFIG_HOME:-~/.config}/茶话间/logs` |
+| macOS | `~/Library/Application Support/茶话间/logs` |
+
+Development instances use `PANTRY_USER_DATA/logs` when overridden. Restarted apps can export retained previous-run records. An unclean marker does not establish a crash cause; native crashes/power loss may leave no stack. If logging fails, bounded in-memory records last until exit and the summary reports persistence errors. Packaging runs only during export, with no per-frame logging or continuous performance monitoring.

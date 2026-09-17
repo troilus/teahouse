@@ -1,4 +1,6 @@
-import { parseSystemMessage } from '../../i18n/messages'
+import { parseSystemMessage, screenRecordText } from '../../i18n/messages'
+import { formatTemplate } from '../../i18n'
+import { parseScreenRecord, type ScreenRecord } from '../../shared/remote-view'
 import type DatabaseT from 'better-sqlite3'
 import type { FileRefView, MessageView, PkRefView } from '../../shared/ipc'
 import { parsePkRef } from '../../shared/pk'
@@ -52,7 +54,7 @@ export function msgRowToView(row: MsgRow): MessageView {
   }
 }
 
-export function messagePreview(row: Pick<MsgRow, 'kind' | 'content' | 'file_ref'>): Pick<MessageView, 'kind' | 'text' | 'fileRef' | 'pkRef' | 'systemRef'> {
+export function messagePreview(row: Pick<MsgRow, 'kind' | 'content' | 'file_ref'>): Pick<MessageView, 'kind' | 'text' | 'fileRef' | 'pkRef' | 'systemRef' | 'screenRef'> {
   let fileRef: FileRefView | undefined
   let pkRef: PkRefView | undefined
   if (row.kind === 'pk') {
@@ -66,6 +68,7 @@ export function messagePreview(row: Pick<MsgRow, 'kind' | 'content' | 'file_ref'
     }
   }
   const systemRef = row.kind === 'system' ? parseSystemMessage(row.file_ref) : undefined
+  const screenRef = row.kind === 'system' ? parseScreenRecord(row.file_ref) : undefined
   return {
     kind:
       row.kind === 'file' ||
@@ -78,6 +81,7 @@ export function messagePreview(row: Pick<MsgRow, 'kind' | 'content' | 'file_ref'
     text: row.content,
     fileRef,
     pkRef,
+    ...(screenRef ? { screenRef } : {}),
     ...(systemRef ? { systemRef } : {})
   }
 }
@@ -98,6 +102,8 @@ export class MsgRepo {
   private readonly deleteByConvStmt: DatabaseT.Statement
   private readonly getStmt: DatabaseT.Statement
   private readonly resetSendingStmt: DatabaseT.Statement
+  private readonly screenUpdateStmt: DatabaseT.Statement
+  private readonly unfinishedScreensStmt: DatabaseT.Statement
 
   constructor(db: DatabaseT.Database) {
     this.insertStmt = db.prepare(`
@@ -139,6 +145,9 @@ export class MsgRepo {
     this.resetSendingStmt = db.prepare(
       "UPDATE messages SET status = 'failed' WHERE status = 'sending' AND is_mine = 1"
     )
+    this.screenUpdateStmt = db.prepare("UPDATE messages SET content = ?, file_ref = ? WHERE id = ? AND kind = 'system'")
+    this.unfinishedScreensStmt = db.prepare(`SELECT * FROM messages WHERE kind = 'system'
+      AND CASE WHEN json_valid(file_ref) THEN json_extract(file_ref, '$.screen.phase') <> 'ended' ELSE 0 END`)
   }
 
   /** 插入消息（按 id 幂等）+ 同步写入全文索引；返回是否真的插入了 */
@@ -188,6 +197,18 @@ export class MsgRepo {
 
   updateStatus(msgId: string, status: string): void {
     this.statusStmt.run(status, msgId)
+  }
+
+  updateScreen(msgId: string, record: ScreenRecord): void {
+    this.screenUpdateStmt.run(screenRecordText(record, formatTemplate), JSON.stringify({ screen: record }), msgId)
+  }
+
+  /** 仅在应用启动装配时调用；离线时段不补计协助时长。 */
+  interruptScreenRecords(): void {
+    for (const row of this.unfinishedScreensStmt.all() as MsgRow[]) {
+      const record = parseScreenRecord(row.file_ref)
+      if (record) this.updateScreen(row.id, { ...record, phase: 'ended', reason: 'interrupted', endedAt: undefined, durationMs: undefined })
+    }
   }
 
   recall(msgId: string): boolean {

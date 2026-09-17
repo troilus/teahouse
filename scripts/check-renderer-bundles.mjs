@@ -2,13 +2,15 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const REQUIRED_ROOTS = ['App.vue', 'SettingsApp.vue', 'CaptureApp.vue', 'ImageViewerApp.vue']
+const REQUIRED_ROOTS = ['App.vue', 'SettingsApp.vue', 'CaptureApp.vue', 'ImageViewerApp.vue', 'RemoteViewApp.vue']
 const DEFAULT_MAX_BOOTSTRAP_BYTES = 200 * 1024
 const DEFAULT_ROOT_BUDGETS = {
+  'RemoteViewApp.vue': { js: 128 * 1024, css: 16 * 1024 },
   // 主窗（决议 #284）：文件柜进主窗后带来 NSelect 与两块视图，静态闭包较 v0.49 抬了约 150 KiB。
   // 不改用动态 import——App 内再套动态 import 会让 Rollup 把 App 的 facade 并进匿名共享块，
   // manifest 里就没有 src/App.vue 这个动态入口了，四入口契约（决议 #210）随之失效。
-  'App.vue': { js: 800 * 1024, css: 116 * 1024 },
+  // 合并上游 v0.60.0 屏幕协助后，E2E 锁标与协助卡片叠加，静态闭包较两分支各自再抬约 1.5 KiB，故各上调一档。
+  'App.vue': { js: 804 * 1024, css: 120 * 1024 },
   'SettingsApp.vue': { js: 704 * 1024, css: 40 * 1024 },
   'CaptureApp.vue': { js: 112 * 1024, css: 12 * 1024 },
   'ImageViewerApp.vue': { js: 160 * 1024, css: 20 * 1024 }
@@ -139,7 +141,7 @@ export function checkRendererBundles({
     .map(({ item }) => item.file)
     .filter((file) => typeof file === 'string' && file.length > 0)
   if (rootFiles.length === REQUIRED_ROOTS.length && new Set(rootFiles).size !== rootFiles.length) {
-    errors.push('四个根组件的输出文件必须互异')
+    errors.push('五个根组件的输出文件必须互异')
   }
 
   const countedFiles = new Set()
@@ -180,7 +182,7 @@ function main() {
     process.exitCode = 1
     return
   }
-  console.log(`[renderer-bundles] 四入口检查通过，公共启动闭包 ${result.bootstrapBytes} 字节`)
+  console.log(`[renderer-bundles] 五入口检查通过，公共启动闭包 ${result.bootstrapBytes} 字节`)
   for (const rootName of REQUIRED_ROOTS) {
     const sizes = result.roots[rootName]
     console.log(`[renderer-bundles] ${rootName} 完整静态闭包 JS ${sizes.js} 字节 / CSS ${sizes.css} 字节`)

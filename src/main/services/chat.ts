@@ -1,4 +1,6 @@
-import { systemMessage } from '../../i18n/messages'
+import { screenRecordText, systemMessage } from '../../i18n/messages'
+import { formatTemplate } from '../../i18n'
+import { parseScreenRecord, type ScreenRecord, type ScreenState } from '../../shared/remote-view'
 import type { SystemMessageKey } from '../../shared/i18n'
 import { randomInt } from 'node:crypto'
 import { EventEmitter } from 'node:events'
@@ -102,6 +104,29 @@ export class ChatService extends EventEmitter {
 
   pageMessages(convId: string, beforeSeq: number | null, limit = 50): MessageView[] {
     return this.deps.msgRepo.page(convId, beforeSeq, limit).map(toMsgView)
+  }
+
+  /** 本机服务生命周期记录；与线上消息发送、帧流和未读计数无关。 */
+  recordScreen(state: ScreenState, initial: boolean): void {
+    const { role, phase, requestedAt, startedAt, endedAt, durationMs, reason } = state
+    const record: ScreenRecord = { v: 1, role, phase, requestedAt, startedAt, endedAt, durationMs, reason }
+    const id = `screen:${state.peerId}:${state.sessionId}`
+    const previous = this.deps.msgRepo.get(id)
+    if (!previous) {
+      // 只有新邀请/当场拒绝可插入，用户删掉聊天后后续状态不能复活它。
+      if (!initial) return
+      const convId = this.deps.convRepo.ensureSingle(state.peerId)
+      this.deps.msgRepo.insert({ id, convId, senderId: role === 'viewer' ? this.deps.selfId : state.peerId,
+        isMine: role === 'viewer', kind: 'system', content: screenRecordText(record, formatTemplate),
+        fileRef: JSON.stringify({ screen: record }), ts: requestedAt, status: 'sent' })
+      this.deps.convRepo.bump(convId, requestedAt)
+    } else {
+      if (parseScreenRecord(previous.file_ref)?.phase === 'ended' || previous.file_ref === JSON.stringify({ screen: record })) return
+      this.deps.msgRepo.updateScreen(id, record)
+    }
+    const row = this.deps.msgRepo.get(id)
+    if (row) this.emit(previous ? 'message-updated' : 'message', toMsgView(row))
+    this.emitConvs()
   }
 
   markRead(convId: string): void {

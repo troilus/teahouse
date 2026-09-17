@@ -892,3 +892,17 @@ describe('transfer 数据面回环', () => {
     expect(dedupeTargetPath(join(dir, 'b.txt'))).toBe(join(dir, 'b.txt'))
   })
 })
+
+
+it('诊断保留真实回环连接拒绝的阶段和系统错误码，不附带文件名', async () => {
+  const server = createServer()
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as import('node:net').AddressInfo).port
+  await new Promise<void>(resolve => server.close(() => resolve()))
+  const phases: string[] = []
+  await expect(pullTransfer({ host: '127.0.0.1', port, selfId: 'test', transferId: 'diagnostic-test',
+    files: [], saveDir: tmpdir(), cancelRef: { canceled: false, socket: null },
+    onProgress: () => undefined, onPhase: phase => phases.push(phase)
+  })).rejects.toMatchObject({ message: 'socket-error', stage: 'connect', code: 'ECONNREFUSED' })
+  expect(phases).toEqual(['connect'])
+})

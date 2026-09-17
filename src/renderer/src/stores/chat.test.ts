@@ -377,10 +377,12 @@ describe('chat store 自己发送后的滚动意图', () => {
 })
 
 describe('未读置读需窗口可见且聚焦（决议 #220）', () => {
+  let msgUpdatedHandler: ((m: MessageView) => void) | null
   let msgNewHandler: ((m: MessageView) => void) | null
   let focusHandler: (() => void) | null
 
   function stubEnv(options: { visibilityState: DocumentVisibilityState; focused: boolean }) {
+    msgUpdatedHandler = null
     msgNewHandler = null
     focusHandler = null
     const markRead = vi.fn().mockResolvedValue(undefined)
@@ -402,6 +404,7 @@ describe('未读置读需窗口可见且聚焦（决议 #220）', () => {
           msgNewHandler = handler
         }),
         onMsgStatus: vi.fn(),
+        onMsgUpdated: vi.fn((handler: (m: MessageView) => void) => { msgUpdatedHandler = handler }),
         onNudgeReceived: vi.fn(),
         onOpenConv: vi.fn(),
         onCaptured: vi.fn(),
@@ -417,6 +420,23 @@ describe('未读置读需窗口可见且聚焦（决议 #220）', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals()
+  })
+
+  it('卡片更新原位合并，不追加消息或改动未读/滚动；缺失记录不回灌', async () => {
+    const { markRead } = stubEnv({ visibilityState: 'visible', focused: true })
+    const store = useChatStore()
+    await store.init()
+    const row = { ...msg('screen-1'), kind: 'system' as const }
+    store.activeConvId = row.convId
+    store.setConversationMessages(row.convId, [row])
+    const run = store.openScrollRun
+    msgUpdatedHandler?.({ ...row, text: '对方已拒绝查看请求' })
+    expect(store.messages[row.convId]).toHaveLength(1)
+    expect(store.getCachedMessage(row.convId, row.id)?.text).toBe('对方已拒绝查看请求')
+    msgUpdatedHandler?.({ ...row, id: 'missing' })
+    expect(store.messages[row.convId]).toHaveLength(1)
+    expect(markRead).not.toHaveBeenCalled()
+    expect(store.openScrollRun).toBe(run)
   })
 
   it('窗口可见且聚焦时，当前会话新消息即时置读', async () => {

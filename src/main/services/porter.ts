@@ -1,11 +1,12 @@
-import { tr, getLanguage } from '../../i18n'
-import { messageText, parseSystemMessage, pkResultText } from '../../i18n/messages'
+import { tr, getLanguage, formatTemplate } from '../../i18n'
+import { messageText, parseSystemMessage, pkResultText, screenDuration, screenRecordText } from '../../i18n/messages'
 import type DatabaseT from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import type { DataExportOptions, DataImportResult, ExportFormat } from '../../shared/ipc'
 import { GROUP_MAX_MEMBERS, LIMITS, isAvatarHash } from '../../shared/protocol'
+import { parseScreenRecord } from '../../shared/remote-view'
 import { parsePkRef, pkLabel } from '../../shared/pk'
 import { toFtsTokens } from '../store/fts'
 import { isPathInsideAny } from '../util/path-policy'
@@ -605,6 +606,12 @@ export class PorterService {
     const convId = msg.convId === `single:${exportedBy}` ? `single:${this.selfId}` : msg.convId
     const isMine = senderId === this.selfId || msg.isMine
     const kind = normalizeKind(msg.kind)
+    const screen = kind === 'system' ? parseScreenRecord(msg.fileRef) : undefined
+    if (screen && screen.phase !== 'ended') {
+      const interrupted = { ...screen, phase: 'ended' as const, reason: 'interrupted' as const, endedAt: undefined, durationMs: undefined }
+      msg.fileRef = JSON.stringify({ screen: interrupted })
+      msg.content = screenRecordText(interrupted, formatTemplate)
+    }
     statements.messageInsert.run(
       msg.id,
       convId,
@@ -860,6 +867,14 @@ function fileLabel(msg: MessageDump): string {
 }
 
 function messageLabel(msg: MessageDump): string {
+  const screen = msg.kind === 'system' ? parseScreenRecord(msg.fileRef) : undefined
+  if (screen) {
+    const parts = [screenRecordText(screen)]
+    if (screen.startedAt !== undefined) parts.push(`${tr('开始时间')}: ${new Date(screen.startedAt).toLocaleString(getLanguage())}`)
+    if (screen.endedAt !== undefined) parts.push(`${tr('结束时间')}: ${new Date(screen.endedAt).toLocaleString(getLanguage())}`)
+    if (screen.durationMs !== undefined) parts.push(`${tr('持续时间')}: ${screenDuration(screen.durationMs)}`)
+    return parts.join(' · ')
+  }
   if (msg.kind === 'system') return messageText({ kind: 'system', text: msg.content, systemRef: parseSystemMessage(msg.fileRef) })
   if (msg.kind === 'image') return tr('[图片]')
   if (msg.kind === 'sticker') return tr('[表情]')

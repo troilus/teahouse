@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import {
   AVATAR_MAX_BYTES,
+  isScreenSessionId,
+  isScreenToken,
+  SCREEN_REJECT_REASONS,
+  SCREEN_END_REASONS,
   isAvatarPresetValue,
   GROUP_IMG_AUTO_ACCEPT,
   GROUP_MAX_MEMBERS,
@@ -125,6 +129,15 @@ export function validateProfile(p: unknown): p is Profile {
 
 function validatePayload(type: string, payload: unknown, textLimit = TEXT_UDP_LIMIT): boolean {
   switch (type) {
+    case MSG_TYPES.screen: {
+      if (!isRecord(payload) || !isScreenSessionId(payload.sessionId)) return false
+      const keys = Object.keys(payload)
+      if (payload.op === 'request') return keys.length === 2
+      if (payload.op === 'accept') return keys.length === 3 && isScreenToken(payload.token)
+      if (payload.op === 'reject') return keys.length === 3 && SCREEN_REJECT_REASONS.some(r => r === payload.reason)
+      if (payload.op === 'end') return keys.length === 3 && SCREEN_END_REASONS.some(r => r === payload.reason)
+      return false
+    }
     case MSG_TYPES.entry:
     case MSG_TYPES.alive:
     case MSG_TYPES.profile: {

@@ -2,6 +2,7 @@ import { SYSTEM_MESSAGE_TEMPLATES, type SystemMessage, type SystemMessageKey,
   type SystemPerson, type TranslationParams } from '../shared/i18n'
 import type { FileRefView, MessagePreview, PkRefView } from '../shared/ipc'
 import { pkLabel } from '../shared/pk'
+import type { ScreenRecord } from '../shared/remote-view'
 import { formatTemplate, tr } from './index'
 
 type Translate = (source: string, params?: TranslationParams) => string
@@ -71,6 +72,7 @@ export function pkResultText(ref: PkRefView, translate: Translate = tr): string 
 }
 
 export function messageText(message: MessagePreview, translate: Translate = tr): string {
+  if (message.kind === 'system' && message.screenRef) return screenRecordText(message.screenRef, translate)
   if (message.kind === 'system') return message.systemRef ? systemMessageText(message.systemRef, translate) : message.text
   if (message.kind === 'image') return translate('[图片]')
   if (message.kind === 'sticker') return translate('[表情]')
@@ -79,4 +81,32 @@ export function messageText(message: MessagePreview, translate: Translate = tr):
     return translate(message.fileRef.dir ? '[文件夹] {0}' : '[文件] {0}', { 0: message.fileRef.name })
   }
   return message.text
+}
+
+export function screenDuration(ms: number): string {
+  const seconds = Math.floor(ms / 1000)
+  const minutes = Math.floor(seconds / 60)
+  return `${minutes >= 60 ? `${Math.floor(minutes / 60)}:` : ''}${String(minutes % 60).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+}
+
+export function screenRecordText(s: ScreenRecord, translate: Translate = tr): string {
+  if (s.phase === 'requesting') return translate('屏幕协助：等待对方同意')
+  if (s.phase === 'awaiting-consent') return translate('屏幕协助：等待你同意')
+  if (s.phase === 'preparing' || s.phase === 'connecting') return translate('屏幕协助：正在连接')
+  if (s.phase === 'active') return translate('屏幕协助进行中')
+  switch (s.reason) {
+    case 'declined': return translate(s.role === 'sharer' ? '你已拒绝查看请求' : '对方已拒绝查看请求')
+    case 'busy': return translate(s.role === 'sharer' ? '你正在进行另一场屏幕协助' : '对方正在进行另一场屏幕协助')
+    case 'unsupported': return translate('当前系统暂不能进行屏幕协助')
+    case 'permission-denied': return translate('屏幕协助未获得录屏权限')
+    case 'capture-failed':
+    case 'capture-ended': return translate('屏幕采集已停止或不可用，请重新请求')
+    case 'timeout': return translate('屏幕协助超时，连接已结束')
+    case 'disconnected': return translate('屏幕连接已断开，请重新请求')
+    case 'locked': return translate('因锁屏或锁屏检测失效，屏幕协助已结束')
+    case 'suspended': return translate('因电脑休眠，屏幕协助已结束')
+    case 'protocol-error': return translate('屏幕画面校验失败，连接已结束')
+    case 'interrupted': return translate('屏幕协助已中断，结束时间未知')
+    default: return s.startedAt === undefined ? translate('屏幕协助请求已取消') : translate('屏幕协助已结束')
+  }
 }

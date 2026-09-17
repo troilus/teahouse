@@ -1,3 +1,4 @@
+import type { DiagnosticReporter } from './diagnostics'
 import { systemMessage } from '../../i18n/messages'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
@@ -116,6 +117,8 @@ interface GroupOfferContext {
 }
 
 export interface FilesDeps {
+  diagnostic?: DiagnosticReporter
+  openScreen?: import('../net/transfer').OutgoingLookup['openScreen']
   selfId: string
   messenger: Messenger
   registry: PeerRegistry
@@ -168,11 +171,13 @@ export class FilesService extends EventEmitter {
           if (!this.canServeOutgoing(transferId, out)) return null
           return out.files.get(fileId) ?? null
         },
-        receiveMessage: (env) => this.deps.messenger.acceptTcpEnvelope(env),
+        receiveMessage: (env, ip) => this.deps.messenger.acceptTcpEnvelope(env, ip),
+        openScreen: deps.openScreen,
         supportsWait: (peerId) => this.peerSupportsTransferWait(peerId)
       },
       deps.bindAddress
     )
+    this.server.on('diagnostic-error', error => deps.diagnostic?.('network.listen', { kind: 'tcp', port: deps.tcpPort, status: 'failed' }, error))
     this.server.on('progress', (transferId: string, delta: number) => {
       const out = this.outgoing.get(transferId)
       if (!out) return
@@ -180,6 +185,7 @@ export class FilesService extends EventEmitter {
       this.emitTransfer(transferId, false)
     })
     this.server.on('served', (transferId: string) => {
+      deps.diagnostic?.('transfer.phase', { transferId, direction: 'out', stage: 'served' })
       const row = this.deps.transferRepo.get(transferId)
       if (!row || row.direction !== 'out') return
       const out = this.outgoing.get(transferId)
@@ -190,6 +196,7 @@ export class FilesService extends EventEmitter {
       this.finish(transferId, 'done')
     })
     this.server.on('disconnected', (transferId: string) => {
+      deps.diagnostic?.('transfer.phase', { transferId, direction: 'out', stage: 'disconnected' })
       const row = this.deps.transferRepo.get(transferId)
       if (row?.status === 'accepted' && this.isExpired(row)) {
         this.finish(transferId, 'expired')
@@ -730,6 +737,9 @@ export class FilesService extends EventEmitter {
     }
 
     void pullTransfer({
+      onPhase: (stage, localAddress, localPort) => this.deps.diagnostic?.('transfer.phase', {
+        transferId, peerId: inc.peerId, direction: 'in', host: peer.ip, port: peer.profile.tcpPort, stage, localAddress, localPort
+      }),
       host: peer.ip,
       port: peer.profile.tcpPort,
       selfId: this.deps.selfId,
@@ -752,7 +762,9 @@ export class FilesService extends EventEmitter {
         this.deps.transferRepo.updateProgress(transferId, inc.bytesDone)
         this.finish(transferId, 'done')
       })
-      .catch((err: Error) => {
+      .catch((err: Error & { stage?: string }) => {
+        this.deps.diagnostic?.('transfer.error', { transferId, peerId: inc.peerId, host: peer.ip,
+          port: peer.profile.tcpPort, direction: 'in', stage: err.stage, reason: err.message.replace(/^peer:/, '') }, err)
         inc.queued = false
         this.deps.transferRepo.updateProgress(transferId, inc.bytesDone)
         const status = this.isExpired(this.deps.transferRepo.get(transferId))
@@ -1654,7 +1666,11 @@ export class FilesService extends EventEmitter {
     if (!force && now - (this.lastEmit.get(transferId) ?? 0) < 250) return
     this.lastEmit.set(transferId, now)
     const view = this.transferView(transferId)
-    if (view) this.emit('transfer', view)
+    if (view) {
+      if (force) this.deps.diagnostic?.('transfer.state', { transferId, msgId: view.msgId, peerId: view.peerId,
+        direction: view.direction, status: view.queued ? 'queued' : view.status, bytes: view.bytesDone, total: view.totalSize, count: view.fileCount })
+      this.emit('transfer', view)
+    }
   }
 
   private applyMsgStatus(msgId: string, status: MessageView['status']): void {

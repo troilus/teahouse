@@ -4,7 +4,8 @@
 
 | Field | Value                                                               |
 |---|---------------------------------------------------------------------|
-| Current protocol | v0.51 main protocol; v0.54.2 restores group snapshot catch-up with independent authorization |
+| Current protocol | Custom JSON with envelope `v:1`; application v0.58.0 adds view-only screen sessions (#310) |
+| Updated | 2026-09-16, #310 screen control, capabilities and demand-driven JPEG transport implemented |
 | Transport | IPv4 UDP control/message plane and TCP data/control fallback        |
 | Authority | [protocol.md](../protocol.md) is the canonical wire-protocol record |
 
@@ -271,6 +272,70 @@ A get request registers a 60-second, source-bound, one-time authorization before
 
 Per-peer list rate is five requests per ten seconds. Requests time out after eight seconds and permit explicit retry. Transfer traffic shares the normal stream and connection budgets.
 
+<a id="remote-view"></a>
+
+### 8.3 Remote desktop viewing (#310, v0.58.0)
+
+This section is implemented with protocol types, strict codec/frame allowlists and loopback tests. Envelope `v:1` and unknown-message compatibility remain unchanged. See [requirements](requirements.md#remote-view) and [technical design](tech-design.md#remote-view).
+
+#### 8.3.1 Channels and capabilities
+
+Add a `screen` envelope. `request/accept/reject` use existing reliable, non-queued messaging with ACK and TCP fallback. `end` is best effort and never delays local shutdown. No screen envelope enters chat storage or offline retry. Under #312, local services separately persist lifecycle metadata cards without images or credentials. Separate in-memory deduplication uses sender + message ID, capped at 256 entries for 120 seconds, without persistent dedup writes. Stopping aborts request/accept retries and TCP waits; cancellation does not mark the peer offline.
+
+The viewer connects to the sharer's existing `profile.tcpPort` (default 17879). The shared listener routes by first frame; screen data uses a separate connection and bypasses file offers, file stream slots, queues, and disk. Do not add a listener. `rv1` means protocol support and receive/view availability; `rvs1` additionally means eligible local sharing, and requires `rv1`. Advertise after UDP/TCP readiness and a working lock-state detector; ARM64 Wayland advertises only receiving. Never trigger system capture consent at startup to discover a capability. User consent is still required for every session.
+
+JPEG/TCP stays plaintext with no TLS, STUN/TURN, WebRTC media transport, or remote URLs. A random token isolates stale/wrong connections; it provides neither encryption nor authenticated identity.
+
+#### 8.3.2 Control payloads
+
+Each row describes the entire payload, validated by an exact per-operation allowlist. `sessionId` is a new viewer-generated UUID v4. Validate both envelope sender and actual inbound IP against the peer/session; a self-reported `from` alone is insufficient.
+
+| op | Fields | Semantics |
+|---|---|---|
+| request | `op, sessionId` | Request only when online, role-compatible, and locally idle. |
+| accept | `op, sessionId, token` | Sent after explicit local consent, screen selection, and capture readiness. Main generates 16 random bytes encoded as 32 lowercase hex characters; bind to session/viewer/IP and one connection. |
+| reject | `op, sessionId, reason` | Reasons: `declined/busy/unsupported/permission-denied/capture-failed/timeout`. |
+| end | `op, sessionId, reason` | Reasons: `user/canceled/timeout/locked/suspended/disconnected/capture-ended/protocol-error/app-exit`. No automatic recovery. |
+
+Only a matching pending request may consume accept. Ignore late accepts and send best-effort end; never resurrect a window/connection. Duplicate requests never prompt/capture twice. Simultaneous opposing invitations reject the incoming request as busy instead of changing roles. Local monotonic deadlines avoid comparing wall clocks between machines. Cancel/reject/timeout records bounded `(peerId, sessionId)` tombstones so an end arriving before request cannot resurrect it. Only valid, rate-limited known-peer traffic may populate this cache; replay cannot extend expiry. Every asynchronous callback checks session generation.
+
+#### 8.3.3 Connection and demand-driven frames
+
+Request → consent/select/capture ready → accept → connect existing port → screen-open → screen-ready → screen-next(1) → screen-frame + JPEG → validate/decode/replace → screen-next(2). Keep at most one outstanding frame request. End, EOF, or deadline terminates both sides.
+
+Reuse 4-byte big-endian length-prefixed JSON control frames and raw byte segments; retain the existing **64 KiB JSON limit**. Exact frame fields:
+
+| type | Other fields | Rule |
+|---|---|---|
+| screen-open | `from, sessionId, token` | First screen frame only. Validate and consume the grant, then bind the socket before ready. |
+| screen-ready | `sessionId` | Once only, after authorization. |
+| screen-next | `sessionId, seq` | Positive safe integer, starting at 1 and increasing by one. No pipelining before the previous frame is fully consumed. |
+| screen-frame | `sessionId, seq, width, height, len` | Echo the outstanding seq; validate metadata, then consume exactly len raw JPEG bytes without base64. |
+
+Only role/state-appropriate frames for the bound session are accepted; no file/message multiplexing inside this connection. A bad handshake may use existing `err` before raw bytes begin. During a partial JPEG, destroy the socket on failure/stop; never insert end/err JSON into raw data. End reason travels separately and best effort; EOF/deadlines work even when it is lost.
+
+Sample only on demand, with one encode/write at a time and bounded backpressure. Receive, validate, decode, and replace the local image before requesting again; DOM application suffices, without waiting for animation frames in minimized windows. Slow consumption lowers frame rate. Bytes already written to TCP cannot be selectively discarded; abort on the absolute frame deadline.
+
+#### 8.3.4 Budgets and validation
+
+| Constant | Value | Purpose |
+|---|---|---|
+| SCREEN_SESSION_MAX | 1 per node | Pending + active, either role |
+| SCREEN_REQUEST_TIMEOUT_MS | 60,000 | From local request creation/receipt; includes picker/system permission time |
+| SCREEN_CONNECT_TIMEOUT_MS | 15,000 | Grant deadline after sending accept; viewer connect/ready deadline after receiving it |
+| SCREEN_FRAME_TIMEOUT_MS | 5,000 | From next to complete consumption; fragments cannot extend it |
+| SCREEN_IDLE_TIMEOUT_MS | 10,000 | Bound socket waiting for next valid next; junk/replay does not renew it |
+| SCREEN_MAX_FRAME_BYTES | 524,288 (512 KiB) | Check before allocation |
+| SCREEN_MAX_EDGE / SCREEN_MAX_PIXELS | 1920 / 2,073,600 | Positive integer dimensions, each ≤1920; portrait allowed |
+| SCREEN_MIN_FRAME_INTERVAL_MS | 100 | Auto initial target and hard ceiling of 10 fps (#310), measured between sampling starts |
+| SCREEN_MAX_BYTES_PER_SECOND | 5,242,880 (5 MiB) | JPEG budget matching 512 KiB × 10 frames; at most one frame of credit, consumed on demand |
+| SCREEN_REQUEST_INTERVAL_MS | 20,000 per peer | Limit new incoming/outgoing requests; existing global ingress limits remain |
+| SCREEN_TERMINAL_TTL_MS / SCREEN_TERMINAL_MAX | 120,000 / 64 | In-memory terminal cache; evict oldest at capacity |
+
+After metadata checks, reuse `shared/image-metadata.ts` `inspectImageMetadata` and require actual JPEG dimensions to match the header and pixel limits. Full decode failure ends the session. Apply the same byte/metadata checks to renderer-to-main output. Keep global TCP connection/first-frame budgets; screen sessions have their own single-session limit and consume no file stream slot. Pass actual `remoteAddress` through TCP control fallback as well as stream authorization; the callback now carries the source and validates it before screen deduplication or peer-address refresh. Address changes/restarts require a new session/grant.
+
+Measure 100ms between sampling starts. After consuming a frame, wait only the remaining interval and byte budget, without adding another fixed 100ms sleep. Keep one outstanding request; slower encoding/network/decoding reduces achieved fps instead of adding parallel frames or catch-up queues. The 5 MiB/s limit counts JPEG payload, with small additional TCP/control overhead; actual links and low-end CPU need measurement.
+
 ## 9. Key constants
 
 | Constant | Value |
@@ -310,6 +375,9 @@ Per-peer list rate is five requests per ten seconds. Requests time out after eig
 
 ## 11. Change record
 
+- **2026-09-16, #308, design only:** reserve §8.3 screen sessions, `rv1/rvs1`, demand-driven JPEG frames on the existing TCP listener, grants, backpressure, and validation/deadlines. Nothing is implemented or advertised; application **v0.57.0** and current wire behavior remain unchanged.
+
+- **2026-09-16, #309, design only:** change the minimum interval to 100ms and JPEG budget to 5,242,880 bytes/s for the default 10 fps target. Retain one-frame backpressure and measure intervals between sampling starts. Current wire behavior and application version are unchanged.
 - **2026-08-26, decision #286:** the Linux/Wayland capture fix adds only local desktop capability probing and main-to-renderer feedback. Wire protocol v0.50, capabilities, transfer sequencing, and compatibility behavior remain unchanged. Repository version 0.51.1 → 0.51.2.
 - **2026-08-27, decision #287:** local sticker import and grid sizing do not affect the wire. Group stickers reuse the existing `file-ctl offer` fields `purpose:"sticker"`, `groupId/groupRev`, and per-online-member transfer behavior; no field, capability, or port was added. Wire protocol remains v0.50. Repository version 0.51.2 → 0.52.0.
 - **2026-08-29, decision #288:** group-text reply-to. The `group-text` payload gains an optional `replyTo` source-message-ID string. The codec accepts only bounded non-empty strings and rejects empty strings or objects with `senderName`/`text`. Receivers look up the source ID in the local group conversation, populate `ReplyMeta` with sender name and first-line text summary, and store the raw ID in `messages.reply_to`. If the target is absent locally, receipt succeeds and the renderer handles the unavailable-target prompt. Protocol advances to v0.51; SQLite advances to v15. Repository version 0.52.0 → **0.53.0**.
@@ -317,3 +385,9 @@ Per-peer list rate is five requests per ten seconds. Requests time out after eig
 - **2026-08-31, decision #290:** group description and group announcement. `GroupMeta` gains backward-compatible optional `description` (≤ 200 characters) and `announce` (≤ 1024 characters) fields. `GroupPatch` gains `set-description` and `set-announce` operations for owners, administrators, or password-holding members. The codec validates present fields while accepting legacy omission; normalization preserves local known values. Inbound metadata rejects unauthorized or mixed changes. SQLite migration v16 adds both columns, and migration backups preserve them. The renderer uses one shared modal from `GroupPanel`, supports clearing, and routes updates through the existing password-aware admin path. Wire protocol remains v0.51; SQLite advances to v16. Repository version 0.53.1 → **0.54.0**.
 - **2026-09-05, decision #291:** PR #39 review fixes add no wire field. The codec continues accepting omitted description and announcement fields; the service accepts only one text change authorized by an owner, administrator, or correct management password and rejects text bundled with an invite, rename, or second text change. Wire protocol remains v0.51; SQLite remains v16. Repository version 0.54.0 → **0.54.1**.
 - **2026-09-05, decision #292:** restored `need/info` catch-up when intermediate revisions are missing. Cumulative text changes may accompany a recognized structural operation only with a sufficient revision gap and independent authorization. Adjacent mixed operations, unauthorized text edits, and invalid structure changes remain rejected. No wire fields were added; protocol v0.51 and SQLite v16 remain unchanged. Repository version 0.54.1 → **0.54.2**.
+
+- 2026-09-16, decision #310: v0.58.0 implements view-only remote assistance, independent windows, Auto (10/5/3 fps) and manual Economy/Standard/Smooth modes. Consent, one-frame backpressure, bounded deadlines, lock detection and forced window cleanup are covered by local tests. Physical target-platform permission and performance checks remain pending; this iteration is not a release.
+
+## Assistance interaction refinement (#312)
+
+Decision #312 (2026-09-17, v0.59.0): screen control packets remain transient and are never queued or persisted. Local services separately retain lifecycle metadata as chat system cards, without credentials or images. No wire changes.

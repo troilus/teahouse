@@ -1,3 +1,5 @@
+import type { ScreenRecord, ScreenState } from '../../shared/remote-view'
+import { screenRecordText } from '../../i18n/messages'
 import { EventEmitter } from 'node:events'
 import { describe, expect, it } from 'vitest'
 import type { Envelope, GroupMeta, MsgPayload } from '../../shared/protocol'
@@ -73,6 +75,12 @@ class FakeMsgRepo {
   updateStatus(msgId: string, status: MsgRow['status']): void {
     const row = this.rows.get(msgId)
     if (row) row.status = status
+  }
+
+  updateScreen(id: string, screen: ScreenRecord): void {
+    const row = this.rows.get(id)!
+    row.file_ref = JSON.stringify({ screen })
+    row.content = screenRecordText(screen)
   }
 
   resetStaleSending(): number {
@@ -516,4 +524,37 @@ describe('ChatService PK', () => {
       pkRef: { game: 'rps', result: 'scissors' }
     })
   })
+})
+
+
+it('屏幕协助每场一张本地卡片：原位更新、重复幂等，不计未读且删除后不复活', async () => {
+  const msgRepo = new FakeMsgRepo(), convRepo = new FakeConvRepo(), messenger = new FakeMessenger()
+  const chat = new ChatService({ selfId: 'self', msgRepo: msgRepo as unknown as MsgRepo,
+    convRepo: convRepo as unknown as ConvRepo, messenger: messenger as unknown as Messenger })
+  const messages: unknown[] = [], updates: unknown[] = []
+  chat.on('message', msg => messages.push(msg))
+  chat.on('message-updated', msg => updates.push(msg))
+  const state: ScreenState = { revision: 1, sessionId: 'session', peerId: 'peer', peerName: '同事', peerIp: '127.0.0.1',
+    role: 'viewer', phase: 'requesting', mode: 'auto', targetFps: 10, requestedAt: 1000 }
+  chat.recordScreen(state, true)
+  chat.recordScreen(state, true)
+  chat.recordScreen({ ...state, phase: 'active', startedAt: 3000 }, false)
+  const end = { ...state, phase: 'ended' as const, startedAt: 3000, endedAt: 5500, durationMs: 2500, reason: 'user' as const }
+  chat.recordScreen(end, false)
+  chat.recordScreen(end, false)
+  chat.recordScreen(state, true)
+  expect(messages).toHaveLength(1)
+  expect(updates).toHaveLength(2)
+  expect(msgRepo.rows.size).toBe(1)
+  expect([...msgRepo.rows.values()][0]).toMatchObject({ ts: 1000, seq: 1, status: 'sent' })
+  expect(JSON.parse([...msgRepo.rows.values()][0].file_ref!).screen.phase).toBe('ended')
+  expect(convRepo.unread).toEqual([])
+  expect(messenger.sent).toEqual([])
+  msgRepo.rows.clear()
+  chat.recordScreen({ ...end, reason: 'unsupported' }, false)
+  expect(msgRepo.rows.size).toBe(0)
+  chat.recordScreen({ ...state, sessionId: 'inbound', role: 'sharer', phase: 'ended', endedAt: 1000, reason: 'busy' }, true)
+  expect(messages).toHaveLength(2)
+  expect([...msgRepo.rows.values()][0].is_mine).toBe(0)
+  await Promise.resolve()
 })

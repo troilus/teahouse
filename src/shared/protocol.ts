@@ -169,7 +169,9 @@ export const CAPS = {
    */
   fileCabinet: 'shr1',
   /** 端到端加密：支持 X25519 密钥协商 + AES-256-GCM 加密文本消息与文件元数据。 */
-  e2eEncrypted: 'e2e1'
+  e2eEncrypted: 'e2e1',
+  remoteView: 'rv1',
+  remoteShare: 'rvs1'
 } as const
 
 /**
@@ -573,7 +575,49 @@ export interface TcpMsgAckFrame {
   type: 'msg-ack'
   ackFor: string
 }
+/** 桌面查看（protocol §8.3）：所有画面及授权只在内存，逐次同意。 */
+export const SCREEN_SESSION_MAX = 1
+export const SCREEN_REQUEST_TIMEOUT_MS = 60_000
+export const SCREEN_CONNECT_TIMEOUT_MS = 15_000
+export const SCREEN_FRAME_TIMEOUT_MS = 5_000
+export const SCREEN_IDLE_TIMEOUT_MS = 10_000
+export const SCREEN_MAX_FRAME_BYTES = 512 * 1024
+export const SCREEN_MAX_EDGE = 1920
+export const SCREEN_MAX_PIXELS = 2_073_600
+export const SCREEN_MIN_FRAME_INTERVAL_MS = 100
+export const SCREEN_MAX_BYTES_PER_SECOND = 5 * 1024 * 1024
+export const SCREEN_REQUEST_INTERVAL_MS = 20_000
+export const SCREEN_TERMINAL_TTL_MS = 120_000
+export const SCREEN_TERMINAL_MAX = 64
+export const SCREEN_REJECT_REASONS = ['declined', 'busy', 'unsupported', 'permission-denied', 'capture-failed', 'timeout'] as const
+export const SCREEN_END_REASONS = ['user', 'canceled', 'timeout', 'locked', 'suspended', 'disconnected', 'capture-ended', 'protocol-error', 'app-exit'] as const
+export type ScreenRejectReason = typeof SCREEN_REJECT_REASONS[number]
+export type ScreenEndReason = typeof SCREEN_END_REASONS[number]
+export type ScreenPayload =
+  | { op: 'request'; sessionId: string }
+  | { op: 'accept'; sessionId: string; token: string }
+  | { op: 'reject'; sessionId: string; reason: ScreenRejectReason }
+  | { op: 'end'; sessionId: string; reason: ScreenEndReason }
+export type ScreenOpenFrame = { type: 'screen-open'; from: string; sessionId: string; token: string }
+export type ScreenFrame = { type: 'screen-frame'; sessionId: string; seq: number; width: number; height: number; len: number }
+export type ScreenTcpFrame = ScreenOpenFrame | ScreenFrame
+  | { type: 'screen-ready'; sessionId: string }
+  | { type: 'screen-next'; sessionId: string; seq: number }
+
+export function isScreenSessionId(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)
+}
+export function isScreenToken(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{32}$/.test(value)
+}
+export function isScreenSize(width: unknown, height: unknown): boolean {
+  return Number.isSafeInteger(width) && Number.isSafeInteger(height) &&
+    (width as number) > 0 && (height as number) > 0 &&
+    (width as number) <= SCREEN_MAX_EDGE && (height as number) <= SCREEN_MAX_EDGE &&
+    (width as number) * (height as number) <= SCREEN_MAX_PIXELS
+}
 export type TcpFrame =
+  | ScreenTcpFrame
   | PullFrame
   | PullOkFrame
   | DoneFrame
@@ -598,7 +642,8 @@ export const MSG_TYPES = {
   avatar: 'avatar',
   update: 'update',
   share: 'share',
-  keyExchange: 'key-exchange'
+  keyExchange: 'key-exchange',
+  screen: 'screen'
 } as const
 
 export function isAvatarHash(value: unknown): value is string {

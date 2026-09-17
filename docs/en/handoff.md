@@ -4,7 +4,7 @@
 
 This is the English current-state handoff for developers and coding agents. Read it together with the [Contributing guide](../../CONTRIBUTING.en.md) and any local automation policy included in your development checkout. The Chinese handoff keeps the complete chronological release notes; `git log` remains authoritative for current implementation history.
 
-Last updated: 2026-09-09 for **v0.57.0** (decision #307, Chinese/English mode). The application remains pinned to Electron 22.3.27, Node 16.17 main/preload, Chrome 108 renderer, and LAN-only runtime behavior.
+Last updated: 2026-09-17. **v0.60.0 adds local diagnostic bundles and feedback (#315); hardware permission/performance acceptance remains pending.** The application remains pinned to Electron 22.3.27, Node 16.17 main/preload, Chrome 108 renderer, and LAN-only runtime behavior. The next new decision number is #316.
 
 Image Viewer now offers Previous/Next canvas buttons across the full local history of the opened conversation, skipping unavailable images and disabling endpoints. Switching keeps window bounds and resets image/OCR state. Wire protocol, database schema, and dependencies are unchanged.
 
@@ -24,8 +24,8 @@ OCR now starts manually on every platform and restores cached results directly a
 
 | Area | State |
 |---|---|
-| Version | 0.56.2 emoji copy and Linux numpad fixes (decision #306) |
-| Branch/release base | `main`, previous release tag `v0.53.1` |
+| Version | 0.59.2 compact assistance cards updated in place (#314); not released |
+| Branch/release base | Verify from `git log` and live GitHub Release state; design documentation does not establish release completion |
 | Core messaging | Private/group text, images, files, stickers, recall, forwarding, mentions, nudge, PK, offline retry |
 | Discovery | Same-subnet broadcast, manual IP/CIDR, gossip, scan-range sharing, confirmed global refresh |
 | Storage | SQLite WAL, append-only migrations, local history/search/transfers/settings |
@@ -95,6 +95,15 @@ Layer rules:
 
 ## 4. Safe next work
 
+**Remote desktop viewing (#310, v0.58.0 implemented, not released):** private-chat View screen → peer consents/selects one screen → independent viewer. Default Auto 10/5/3 fps, manual 3/5/10 fps, per-session mode. JPEG uses the existing plaintext TCP listener, one frame on demand, without new dependencies or servers.
+
+- Read [requirements](requirements.md#remote-view), [protocol](protocol.md#remote-view), [technical design](tech-design.md#remote-view) and [UI behavior](ui-design.md#remote-view). The next decision is #316.
+- Entry points: `services/remote-view.ts`, `net/screen-stream.ts`, `windows/remote-view-window.ts`, `util/linux-screen-lock.ts` and the fifth dynamic root `RemoteViewApp.vue`.
+- Run all five checks and, after build, `npm run test:screen`. Use `PANTRY_SCREEN_TEST_MS=600000 npm run test:screen` for ten minutes. The real Electron test uses synthetic office content and exercises actual media/Canvas/IPC/TCP/display without capturing the user's desktop.
+- Local results (2026-09-16): 120 files / 776 tests and all five checks passed. Synthetic Electron viewing ran for ten minutes at about 9.45 fps; reverse media/encoding/transport and lock cleanup passed, as did small-window, bilingual/theme and stale-frame recovery checks.
+- Remaining hardware work: Win7 x64/ia32 and UOS/Kylin capture, pointer, text, DPI, CPU/memory and lock behavior; macOS physical-screen permission grant/deny/revoke. Record dual-machine/routed-subnet behavior, 30 real capture cycles and latency percentiles per technical §3.1.6.
+- Linux requires existing `gdbus` plus working DDE/UKUI lock state; monitor loss disables capability and ends sessions. Preserve the ARM64 Wayland sharing guard. Builds and synthetic loopback do not establish target-platform support.
+
 ### 4.1 Always required for later increments
 
 - Keep Chinese and English current docs synchronized and run `npm run check:docs`.
@@ -126,6 +135,10 @@ Neiwangtong compatibility (#194–#196) is a design-only long-term item. Decisio
 
 ## 6. Environment notes
 
+Documentation update 2026-09-16: requirements, protocol, UI, architecture, and implementation/acceptance plans for #308 were synchronized in both languages. Capture/network implementation and target-platform feature validation have not started.
+
+Decision #309 updates the documented target to 10 fps with matching limits, scheduling, and acceptance; there is still no feature implementation.
+
 - Development Node is 18 or later; packaged main/preload runtime is Node 16.17.
 - `.npmrc` values for Electron runtime/target, mirror, and `legacy-peer-deps` are intentional.
 - A macOS Electron extraction failure may require `ditto` and a newline-free `path.txt`; see [Contributing](../../CONTRIBUTING.en.md#troubleshooting).
@@ -141,3 +154,23 @@ Decision #305 corrects native selection-box dimensions and keeps a text cursor t
 Validation for #306: all five local gates passed (115 test files, 714 tests). Run `node scripts/input-selftest.cjs` to rebuild and mount the real components in isolated Electron 22, checking native emoji copy/paste/cut/undo and 31 numpad cases without starting application networking. Target Win7/UOS native event chains still require real-platform verification.
 
 > 2026-09-09: v0.57.0 (#307, local implementation complete) adds offline Chinese/English switching across all windows and structured metadata for new system messages. Existing configurations keep Chinese; historical messages retain their original text. All five local gates passed (117 test files, 723 tests), with all four entry bundle budgets preserved. After building, run `node scripts/i18n-selftest.cjs` for real Electron 22 checks of onboarding, bidirectional switching across four windows, draft/selection retention, persistence, legacy configuration and invalid language rejection. The test uses isolated data and loopback-only UDP/TCP. English layouts were inspected at the minimum settings size and in capture/image windows. Win7/UOS UI verification remains a target-platform check; installer publication status is tracked by GitHub Release.
+
+- 2026-09-16, decision #310: v0.58.0 implements view-only remote assistance, independent windows, Auto (10/5/3 fps) and manual Economy/Standard/Smooth modes. Consent, one-frame backpressure, bounded deadlines, lock detection and forced window cleanup are covered by local tests. Physical target-platform permission and performance checks remain pending; this iteration is not a release.
+
+- 2026-09-17, #311, v0.58.1: fixed source actions, compact 440×180 sharing content area, native bitmap ownership transfer with explicit release, and bounded 3/5/10 fps capture constraints. Linux lock checks start asynchronously, use 60-second idle / 5-second active polling, recover monitoring and support the newer DDE interface. Preserve minimized state during invitations and reuse IME-aware Escape. After building, `PANTRY_SCREEN_SOFTWARE=1 PANTRY_SCREEN_PROFILE=1 npm run test:screen` exercises actual Electron with synthetic-only sources; optional `PANTRY_REMOTE_TEST_ARTIFACTS` saves screenshots. Physical Win7/UOS/Kylin/macOS permissions, DPI and native capture cost still require target machines. Not released.
+
+Local validation: **121 test files / 790 tests**, Electron-ABI database checks, type checks, build, startup smoke and version consistency passed. Actual Electron software-rendering tests cover native bitmap transfer and forced Canvas 2D fallback; 120-second viewing averaged **9.30 fps**. In one same-host 30-second comparison, viewer CPU was **2.053% → 0.757%** and working set **645 → 188 MiB**; these figures do not establish target-platform savings. Capture constraints at 10/5/3/10 fps, bounded high-resolution output, unsupported-constraint fallback and lock-triggered cleanup passed. Physical permissions, DPI and long-term memory still require Win7/UOS/Kylin/macOS target machines.
+
+- 2026-09-17, #312, **v0.59.0**: confirm before sending (cancel sends nothing); reuse the sharing window/stream as a 320×56 DIP edge strip. Persist one local system card per legitimate request, updating refusals/cancellations/timeouts and start/end/monotonic connected duration. Reuse SQLite metadata with no migration or wire changes; unfinished records on startup/import become interrupted with unknown end/duration. Lifecycle-only writes occur after capture cleanup; no per-frame writes, duplicate unread events or deleted-history resurrection. `test:screen` covers real native confirmation/Tab/Escape, cards, both themes/languages and edge bounds; `test:db` covers persistence, recovery and backup/export. Target-machine permission, native capture and DPI checks remain open. Not released.
+
+Local validation for #312: 121 files / 795 tests; database self-test on Node 16.17.1 / ABI 110, typecheck, build, smoke and version consistency passed. Actual Electron 22 software-rendered synthetic loopback covers confirmation/cancel, Tab/Escape, languages/themes, pending/declined/completed cards, 320×56 edge placement/work-area changes, existing rate modes and lock cleanup. This does not establish physical target-platform support.
+
+- 2026-09-17, #313, **v0.59.1**: assistance cards reuse ordinary message rows and persisted `isMine` for right/left initiator alignment, preserved through updates and history reload. No new timers, dependencies, protocol or storage changes. All five checks passed (121 files / 795 tests); real Electron 22 with software rendering verified request, completion, incoming, refusal and reload geometry, with bilingual/theme screenshots inspected. Not released.
+
+- 2026-09-17, #314, **v0.59.2**: compact two-line assistance cards measured 260×63.5px locally, using mine/peer bubble colors. Full times/reasons remain in native hover and accessible text; remove the duplicate normal-session banner and timing table. Reuse existing in-place session updates. Real Electron assertions confirm unchanged record ID, DOM node and card count through request/start/end; refusal, reload, themes and languages passed. All five checks passed (122 files / 796 tests); main-window JS/CSS decreased by 444/86 bytes with no added per-frame or per-second work. Not released.
+
+## 2026-09-17 — v0.60.0 diagnostics (#315)
+
+Implemented: DiagnosticsService owns bounded logs and redaction; diagnostics-ui and its Worker export a local ZIP; DiagnosticsPanel lives in Settings → About. No database or wire changes. Next decision #316. Target-platform hardware/permission acceptance remains pending.
+
+Validation: 123 files / 801 tests, Electron ABI database checks, typecheck, build and isolated smoke all passed. `npm run test:diagnostics` exercises real Electron 22 IPC/Worker, redacted bundles, disk errors, abnormal restart and light/dark/English 125% UI. A local ~9 MiB fixture exported in 221 ms with a 17 ms maximum main-thread heartbeat interval; this is a local sample only. The synthetic-screen regression also passed. Win7/UOS/Kylin hardware acceptance remains pending. No new dependencies, migrations or wire changes.

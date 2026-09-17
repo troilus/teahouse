@@ -41,6 +41,7 @@ interface PendingEntry {
 }
 
 export class Messenger extends EventEmitter {
+  private readonly screenSeen = new Map<string, number>()
   private readonly udp: UdpChannel
   private readonly registry: PeerRegistry
   private readonly selfId: string
@@ -91,9 +92,9 @@ export class Messenger extends EventEmitter {
   }
 
   /** 可靠发送但不入队（文件控制报文用——对方离线时直接失败，决议 #4） */
-  async sendReliable(peerId: string, env: Envelope): Promise<boolean> {
-    const acked = await this.sendAwaitAck(peerId, env)
-    if (!acked) this.registry.markOffline(peerId)
+  async sendReliable(peerId: string, env: Envelope, signal?: AbortSignal): Promise<boolean> {
+    const acked = await this.sendAwaitAck(peerId, env, signal)
+    if (!acked && !signal?.aborted) this.registry.markOffline(peerId)
     return acked
   }
 
@@ -153,13 +154,18 @@ export class Messenger extends EventEmitter {
   }
 
   /** TCP 控制帧入口：复用同一套入站白名单、去重和事件分发。 */
-  acceptTcpEnvelope(raw: Envelope): boolean {
+  acceptTcpEnvelope(raw: Envelope, remoteAddress?: string): boolean {
     const result = decodeTcpEnvelopeObject(raw)
     if (!result.ok || !result.known) return false
     const env = result.env
     if (env.from === this.selfId) return false
     if (!isReliableControlType(env.type)) {
       return false
+    }
+    if (env.type === MSG_TYPES.screen) {
+      if (!this.isScreenSource(env.from, remoteAddress)) return false
+      if (!this.seenScreen(env)) this.emit('incoming', env, { address: remoteAddress })
+      return true
     }
     if (this.dedup.has(env.id)) return true
     this.dedup.add(env.id, Date.now())
@@ -169,10 +175,11 @@ export class Messenger extends EventEmitter {
 
   /** 发送并等待 ACK：按 ackRetrySchedule 退避重发，每次重发都重读对端最新地址。
    *  等待表按 (收件人, 信封 id) 复合键——群消息同一信封并发发往多个成员互不串线（§7.4） */
-  private sendAwaitAck(peerId: string, env: Envelope): Promise<boolean> {
+  private sendAwaitAck(peerId: string, env: Envelope, signal?: AbortSignal): Promise<boolean> {
+    if (signal?.aborted) return Promise.resolve(false)
     const buf = encode(env)
     if (buf.length > UDP_MAX_PAYLOAD) {
-      return this.sendTcpAwaitAck(peerId, env)
+      return this.sendTcpAwaitAck(peerId, env, signal)
     }
     return new Promise((resolve) => {
       const key = this.queueKey(peerId, env.id)
@@ -183,19 +190,22 @@ export class Messenger extends EventEmitter {
         timer: null,
         expected: null,
         settle: (acked: boolean) => {
-          if (!this.pending.has(key)) return
+          if (this.pending.get(key) !== entry) return
           this.pending.delete(key)
           if (entry.timer) clearTimeout(entry.timer)
+          signal?.removeEventListener('abort', abort)
           resolve(acked)
         }
       }
       this.pending.set(key, entry)
+      const abort = (): void => entry.settle(false)
+      signal?.addEventListener('abort', abort, { once: true })
 
       const delays = this.t.ackRetrySchedule
       let attempt = 0
       const step = (): void => {
         if (attempt === delays.length) {
-          void this.sendTcpAwaitAck(peerId, env).then((acked) => entry.settle(acked))
+          void this.sendTcpAwaitAck(peerId, env, signal).then((acked) => entry.settle(acked))
           return
         }
         const record = this.registry.get(peerId)
@@ -212,7 +222,8 @@ export class Messenger extends EventEmitter {
     })
   }
 
-  private sendTcpAwaitAck(peerId: string, env: Envelope): Promise<boolean> {
+  private sendTcpAwaitAck(peerId: string, env: Envelope, signal?: AbortSignal): Promise<boolean> {
+    if (signal?.aborted) return Promise.resolve(false)
     const record = this.registry.get(peerId)
     if (!record) return Promise.resolve(false)
     return new Promise((resolve) => {
@@ -223,10 +234,13 @@ export class Messenger extends EventEmitter {
         if (settled) return
         settled = true
         clearTimeout(timer)
+        signal?.removeEventListener('abort', abort)
         socket.destroy()
         resolve(ok)
       }
       timer = setTimeout(() => settle(false), 7_000)
+      const abort = (): void => settle(false)
+      signal?.addEventListener('abort', abort, { once: true })
       const reader = new FrameReader(
         (frame) => {
           if (frame.type === 'msg-ack' && frame.ackFor === env.id) {
@@ -274,17 +288,38 @@ export class Messenger extends EventEmitter {
 
     // 可靠类型：无条件回 ACK（含重复），让对端停止重传
     if (isReliableControlType(env.type)) {
-      if (this.registry.get(env.from)) {
+      // 屏幕授权绑定原有地址；不能先 touch 把不可信来源变成当前地址。
+      if (env.type === MSG_TYPES.screen && !this.isScreenSource(env.from, rinfo.address)) return
+      if (env.type !== MSG_TYPES.screen && this.registry.get(env.from)) {
         const record = this.registry.touch(env.from, rinfo.address, rinfo.port)
         if (!record) return
       }
       const ack = makeEnvelope<AckPayload>(MSG_TYPES.ack, this.selfId, { ackFor: env.id })
       this.udp.send(ack, rinfo.address, rinfo.port)
 
+      if (env.type === MSG_TYPES.screen) {
+        if (!this.seenScreen(env)) this.emit('incoming', env, rinfo)
+        return
+      }
+
       if (this.dedup.has(env.id)) return // 补发/重传造成的重复，只应答不重复处理
       this.dedup.add(env.id, Date.now())
       this.emit('incoming', env, rinfo)
     }
+  }
+  private isScreenSource(peerId: string, ip?: string): boolean {
+    const peer = this.registry.get(peerId)
+    return Boolean(peer && ip && peer.ip === ip.replace(/^::ffff:/, ''))
+  }
+
+  private seenScreen(env: Envelope): boolean {
+    const now = Date.now()
+    for (const [key, time] of this.screenSeen) if (now - time > 120_000) this.screenSeen.delete(key)
+    const key = `${env.from}|${env.id}`
+    if (this.screenSeen.has(key)) return true
+    if (this.screenSeen.size >= 256) this.screenSeen.delete(this.screenSeen.keys().next().value!)
+    this.screenSeen.set(key, now)
+    return false
   }
 }
 
@@ -302,6 +337,7 @@ function isReliableControlType(type: string): boolean {
     // 共享文件柜控制面（§8.2）：list-ok 常超 UDP 上限，必须能走 TCP 控制帧兜底
     type === MSG_TYPES.share ||
     // 端到端加密公钥交换
-    type === MSG_TYPES.keyExchange
+    type === MSG_TYPES.keyExchange ||
+    type === MSG_TYPES.screen
   )
 }

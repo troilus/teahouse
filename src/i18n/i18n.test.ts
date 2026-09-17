@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { getLanguage, initialLanguage, isLanguage, setLanguage, tr } from './index'
 import english from './en'
-import { messageText, parseSystemMessage, systemMessage } from './messages'
+import { parseScreenRecord } from '../shared/remote-view'
+import { screenDuration, messageText, parseSystemMessage, systemMessage } from './messages'
 import { loadAppState, saveAppSettings } from '../main/store/app-state'
 import { incomingNotificationOptions } from '../main/notifications'
 import { messagePreview } from '../main/store/msg-repo'
@@ -109,4 +110,24 @@ describe('用户内容和系统提示边界', () => {
     expect(incomingNotificationOptions({ ...input, hidePreview: true }).body).toBe('New message received')
     expect(incomingNotificationOptions({ ...input, msg: { ...msg, kind: 'image' } }).body).toBe('[Image]')
   })
+})
+
+
+it('屏幕记录按本机角色与当前语言展示；损坏元数据回退文本', async () => {
+  const screen = { v: 1, role: 'sharer', phase: 'ended', requestedAt: 1000, endedAt: 2000, reason: 'declined' }
+  const view = messagePreview({ kind: 'system', content: '回退文本', file_ref: JSON.stringify({ screen }) })
+  await setLanguage('zh-CN')
+  expect(messageText(view)).toBe('你已拒绝查看请求')
+  await setLanguage('en')
+  expect(messageText(view)).toBe('You declined the viewing request')
+  expect(screenDuration(0)).toBe('00:00')
+  expect(screenDuration(3661250)).toBe('1:01:01')
+  for (const invalid of [null, { ...screen, v: 2 }, { ...screen, role: 'other' }, { ...screen, reason: '__proto__' },
+    { ...screen, requestedAt: -1 }, { ...screen, startedAt: 3000, durationMs: -1 }, { ...screen, phase: 'active' },
+    { ...screen, endedAt: undefined }]) {
+    const raw = JSON.stringify({ screen: invalid })
+    expect(parseScreenRecord(raw)).toBeUndefined()
+    expect(messageText(messagePreview({ kind: 'system', content: '回退文本', file_ref: raw }))).toBe('回退文本')
+  }
+  await setLanguage('zh-CN')
 })

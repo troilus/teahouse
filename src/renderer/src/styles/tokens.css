@@ -31,7 +31,6 @@
   --material-bar: rgba(249, 251, 250, 0.8);
   --material-panel: rgba(241, 245, 243, 0.9);
   --material-strong: rgba(255, 255, 255, 0.9);
-  --scrim: rgba(18, 31, 25, 0.45);
   --surface-hover: rgba(38, 61, 50, 0.055);
   --surface-selected: rgba(61, 139, 107, 0.14);
   --surface-pressed: rgba(61, 139, 107, 0.2);
@@ -62,7 +61,6 @@ html[data-theme='dark'] {
   --material-bar: rgba(23, 27, 25, 0.82);
   --material-panel: rgba(28, 34, 31, 0.92);
   --material-strong: rgba(34, 42, 37, 0.92);
-  --scrim: rgba(0, 0, 0, 0.58);
   --surface-hover: rgba(235, 245, 239, 0.06);
   --surface-selected: rgba(91, 191, 145, 0.18);
   --surface-pressed: rgba(91, 191, 145, 0.25);
@@ -70,6 +68,10 @@ html[data-theme='dark'] {
   --shadow-float: 0 2px 8px rgba(0, 0, 0, 0.24), 0 18px 46px rgba(0, 0, 0, 0.34);
   --highlight-edge: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
+
+/* Chrome 108 的原生 dialog backdrop 不继承根元素变量。 */
+:root, ::backdrop { --scrim: rgba(18, 31, 25, 0.45); }
+html[data-theme='dark'], html[data-theme='dark'] ::backdrop { --scrim: rgba(0, 0, 0, 0.58); }
 
 /* Win7 / Linux 默认软渲染画像（决议 #231）：浮层保留层级与边界，关闭逐帧背景重采样并缩短阴影。 */
 html[data-rendering='software'] {

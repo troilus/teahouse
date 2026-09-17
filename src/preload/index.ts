@@ -60,6 +60,24 @@ ipcRenderer.on(IpcEvents.captureInit, (_event, pngBytes: ArrayBuffer) => {
 
 // 渲染进程一切能力的唯一入口（tech-design §2 安全基线：sandbox + contextBridge）
 const api: PantryApi = {
+  requestScreen: (peerId, focusOnly = false) => ipcRenderer.invoke(IpcChannels.screenRequest, peerId, focusOnly),
+  getScreenSources: id => ipcRenderer.invoke(IpcChannels.screenSources, id),
+  respondScreen: (id, accepted, source) => ipcRenderer.invoke(IpcChannels.screenRespond, id, accepted, source),
+  screenReady: id => ipcRenderer.invoke(IpcChannels.screenReady, id),
+  failScreen: (id, reason) => ipcRenderer.invoke(IpcChannels.screenFail, id, reason),
+  stopScreen: id => ipcRenderer.invoke(IpcChannels.screenStop, id),
+  getScreenState: () => ipcRenderer.invoke(IpcChannels.screenState),
+  getScreenAvailability: () => ipcRenderer.invoke(IpcChannels.screenAvailability),
+  sendScreenFrame: (id, seq, bytes) => ipcRenderer.invoke(IpcChannels.screenFrame, id, seq, bytes),
+  consumeScreenFrame: (id, seq) => ipcRenderer.invoke(IpcChannels.screenConsumed, id, seq),
+  setScreenMode: (id, mode) => ipcRenderer.invoke(IpcChannels.screenMode, id, mode),
+  onScreenState: listener => subscribe(IpcEvents.screenState, listener),
+  onScreenSample: listener => subscribe(IpcEvents.screenSample, listener),
+  onScreenImage: listener => subscribe(IpcEvents.screenImage, listener),
+  exportDiagnostics: includeNetwork => ipcRenderer.invoke(IpcChannels.diagnosticsExport, includeNetwork),
+  copyDiagnosticEnvironment: () => ipcRenderer.invoke(IpcChannels.diagnosticsCopy),
+  revealDiagnostics: () => ipcRenderer.invoke(IpcChannels.diagnosticsReveal),
+  reportDiagnosticError: (kind, name, line, column) => ipcRenderer.send(IpcChannels.diagnosticsError, kind, name, line, column),
   getAppInfo: (): Promise<AppInfo> => ipcRenderer.invoke(IpcChannels.appInfo),
   openUrl: (url: string): Promise<boolean> => ipcRenderer.invoke(IpcChannels.appOpenUrl, url),
   getNetState: (): Promise<NetState> => ipcRenderer.invoke(IpcChannels.netState),
@@ -269,6 +287,7 @@ const api: PantryApi = {
   onUpdateAvailable: (listener) =>
     subscribe<UpdateAvailability | null>(IpcEvents.updateAvailable, listener),
   onMsgNew: (listener) => subscribe<MessageView>(IpcEvents.msgNew, listener),
+  onMsgUpdated: (listener) => subscribe<MessageView>(IpcEvents.msgUpdated, listener),
   onMsgStatus: (listener) => subscribe<MsgStatusEvent>(IpcEvents.msgStatus, listener),
   onNudgeReceived: (listener) => subscribe<NudgeEvent>(IpcEvents.nudgeReceived, listener),
   onConvsUpdated: (listener) => subscribe<ConversationView[]>(IpcEvents.convsUpdated, listener),

@@ -12,9 +12,15 @@ async function bootstrap(): Promise<void> {
   const entry = resolveRendererEntry(location.hash)
   if (entry === 'capture') document.documentElement.dataset.window = 'capture'
   const [root] = await Promise.all([loadRendererRoot(entry), initLanguage()])
-  createApp(root.default).use(createPinia()).mount('#app')
+  const app = createApp(root.default).use(createPinia())
+  app.config.errorHandler = error => {
+    window.pantry.reportDiagnosticError('vue', error instanceof Error ? error.name : 'Error')
+    console.error(error)
+  }
+  app.mount('#app')
 }
 
-void bootstrap().catch(() => {
-  console.error('[renderer] 窗口入口加载失败')
+void bootstrap().catch(error => {
+  window.pantry.reportDiagnosticError('bootstrap', error instanceof Error ? error.name : 'Error')
+  console.error(error)
 })

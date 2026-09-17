@@ -144,6 +144,11 @@ export const useChatStore = defineStore('chat', {
           void window.pantry.markRead(msg.convId)
         }
       })
+      window.pantry.onMsgUpdated((msg) => {
+        const list = this.messages[msg.convId]
+        const target = list && messageCacheFor(msg.convId, list).byId.get(msg.id)
+        if (target) Object.assign(target, msg)
+      })
       // 回到窗口时补置读当前会话攒下的未读，托盘闪烁与角标同步停止（决议 #220）
       window.addEventListener('focus', () => {
         const convId = this.activeConvId

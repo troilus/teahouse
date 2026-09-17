@@ -23,7 +23,8 @@ function createFixture(transform = (manifest) => manifest) {
         'src/App.vue',
         'src/SettingsApp.vue',
         'src/CaptureApp.vue',
-        'src/ImageViewerApp.vue'
+        'src/ImageViewerApp.vue',
+        'src/RemoteViewApp.vue'
       ]
     },
     '_vendor.js': { file: 'assets/vendor.js' },
@@ -50,6 +51,9 @@ function createFixture(transform = (manifest) => manifest) {
       src: 'src/ImageViewerApp.vue',
       isDynamicEntry: true
     },
+    'src/RemoteViewApp.vue': {
+      file: 'assets/RemoteViewApp.js', src: 'src/RemoteViewApp.vue', isDynamicEntry: true
+    },
     '_shared.js': { file: 'assets/shared.js', css: ['assets/shared.css'] }
   })
 
@@ -64,7 +68,7 @@ function createFixture(transform = (manifest) => manifest) {
 }
 
 describe('checkRendererBundles', () => {
-  it('四个动态入口独立可达且公共启动闭包未超限时通过', () => {
+  it('五个动态入口独立可达且公共启动闭包未超限时通过', () => {
     const { outDir } = createFixture()
 
     expect(checkRendererBundles({ outDir, maxBootstrapBytes: 200 })).toEqual({
@@ -74,7 +78,8 @@ describe('checkRendererBundles', () => {
         'App.vue': { js: 140, css: 12 },
         'SettingsApp.vue': { js: 140, css: 7 },
         'CaptureApp.vue': { js: 120, css: 0 },
-        'ImageViewerApp.vue': { js: 120, css: 0 }
+        'ImageViewerApp.vue': { js: 120, css: 0 },
+        'RemoteViewApp.vue': { js: 120, css: 0 }
       }
     })
   })

@@ -4,7 +4,7 @@
 
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import Database from 'better-sqlite3'
@@ -12,7 +12,8 @@ import { openDatabase } from './db'
 import { MIGRATIONS, applyMigrations } from './migrations'
 import { PeersRepo } from './peers-repo'
 import { ConvRepo } from './conv-repo'
-import { MsgRepo } from './msg-repo'
+import { MsgRepo, msgRowToView } from './msg-repo'
+import { parseScreenRecord, type ScreenRecord } from '../../shared/remote-view'
 import { QueueRepo } from './queue-repo'
 import { DedupRepo } from './dedup-repo'
 import { TransferRepo } from './transfer-repo'
@@ -74,6 +75,55 @@ try {
   console.log(`[db-selftest] runtime node=${process.versions.node} abi=${process.versions.modules}`)
   verifyGlobalSearch()
   verifyImageNavigationQueries()
+
+  // 协助卡片复用系统消息，验证真实 SQLite 持久性与异常退出自愈。
+  const screenDbPath = join(dir, 'screen.db')
+  let screenDb = openDatabase(screenDbPath)
+  let screenMessages = new MsgRepo(screenDb)
+  const screenConvs = new ConvRepo(screenDb)
+  const screenConv = screenConvs.ensureSingle('screen-peer')
+  const screenBase: ScreenRecord = { v: 1, role: 'viewer', phase: 'requesting', requestedAt: 1000 }
+  for (const id of ['done', 'waiting', 'active', 'bad']) screenMessages.insert({
+    id, convId: screenConv, senderId: 'self', isMine: true, kind: 'system', content: '屏幕协助',
+    fileRef: JSON.stringify({ screen: screenBase }), ts: 1000, status: 'sent'
+  })
+  screenMessages.updateScreen('done', { ...screenBase, phase: 'ended', startedAt: 5000, endedAt: 4000, durationMs: 65000, reason: 'user' })
+  screenMessages.updateScreen('active', { ...screenBase, phase: 'active', startedAt: 5000 })
+  screenDb.prepare('UPDATE messages SET file_ref = ? WHERE id = ?').run('{损坏记录', 'bad')
+  const originalSeq = screenMessages.get('done')!.seq
+  assert.equal(msgRowToView(screenMessages.get('done')!).screenRef?.durationMs, 65000)
+  assert.equal(screenConvs.list()[0].preview_kind, 'system')
+  assert.equal(screenConvs.list()[0].unread, 0)
+  assert.equal((screenDb.prepare('SELECT COUNT(*) n FROM messages_fts').get() as { n: number }).n, 0, '卡片不进入文本搜索索引')
+  const screenBackup = join(dir, 'screen.pantry-bak'), screenText = join(dir, 'screen.txt')
+  const screenPorter = new PorterService(screenDb, 'self', '本机', join(dir, 'screen-media'))
+  screenPorter.export('backup', screenBackup)
+  screenPorter.export('txt', screenText)
+  assert.ok(readFileSync(screenText, 'utf8').includes('01:05'), '文字导出包含协助时长')
+  const screenRestored = openDatabase(join(dir, 'screen-restored.db'))
+  new PorterService(screenRestored, 'self', '本机', join(dir, 'screen-restored-media')).importBackup(screenBackup)
+  const restoredScreenMessages = new MsgRepo(screenRestored)
+  assert.equal(parseScreenRecord(restoredScreenMessages.get('done')!.file_ref)?.durationMs, 65000)
+  assert.equal(parseScreenRecord(restoredScreenMessages.get('active')!.file_ref)?.reason, 'interrupted', '导入未结束记录不能冒充仍在共享')
+  screenRestored.close()
+  screenDb.close()
+  screenDb = openDatabase(screenDbPath)
+  screenMessages = new MsgRepo(screenDb)
+  screenMessages.interruptScreenRecords()
+  assert.equal(screenMessages.get('done')!.seq, originalSeq, '更新保留消息顺序')
+  assert.equal(parseScreenRecord(screenMessages.get('done')!.file_ref)?.durationMs, 65000, '重启保留完整时长')
+  for (const id of ['waiting', 'active']) {
+    const recovered = parseScreenRecord(screenMessages.get(id)!.file_ref)!
+    assert.equal(recovered.phase, 'ended')
+    assert.equal(recovered.reason, 'interrupted')
+    assert.equal(recovered.endedAt, undefined)
+    assert.equal(recovered.durationMs, undefined, '不把离线时间补成协助时长')
+  }
+  assert.equal(screenMessages.get('bad')!.file_ref, '{损坏记录')
+  const recoveredRef = screenMessages.get('active')!.file_ref
+  screenMessages.interruptScreenRecords()
+  assert.equal(screenMessages.get('active')!.file_ref, recoveredRef, '启动自愈幂等')
+  screenDb.close()
 
   // 1. 迁移就位
   assert.equal(db.pragma('user_version', { simple: true }), 18, '迁移版本应为 18')
@@ -283,7 +333,6 @@ try {
   })
   const rowWithQuote = msgRepo.get('m-reply')
   assert.equal(rowWithQuote?.reply_to, 'm-1', 'reply_to 列应存储引用消息ID')
-  const { msgRowToView } = require('./msg-repo')
   const viewWithQuote = msgRowToView(rowWithQuote!)
   assert.equal(viewWithQuote.replyTo, 'm-1')
   const conv = convRepo.get(convId)

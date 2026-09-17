@@ -1,4 +1,4 @@
-import { LIMITS, type TcpFrame } from '../../shared/protocol'
+import { LIMITS, isScreenSessionId, isScreenToken, isScreenSize, SCREEN_MAX_FRAME_BYTES, type TcpFrame } from '../../shared/protocol'
 import { decodeTcpEnvelopeObject } from './codec'
 
 // TCP 帧编解码（protocol §8）：4 字节大端长度前缀 + UTF-8 JSON 控制帧；
@@ -30,6 +30,22 @@ export function decodeTcpFrameObject(raw: unknown): TcpFrame | null {
   if (!isRecord(raw) || typeof raw.type !== 'string') return null
 
   switch (raw.type) {
+    case 'screen-open':
+      if (!hasOnlyKeys(raw, ['type', 'from', 'sessionId', 'token'])) return null
+      if (!isBoundedString(raw.from, LIMITS.from) || !isScreenSessionId(raw.sessionId) || !isScreenToken(raw.token)) return null
+      return raw as unknown as TcpFrame
+    case 'screen-ready':
+      if (!hasOnlyKeys(raw, ['type', 'sessionId']) || !isScreenSessionId(raw.sessionId)) return null
+      return raw as unknown as TcpFrame
+    case 'screen-next':
+      if (!hasOnlyKeys(raw, ['type', 'sessionId', 'seq']) || !isScreenSessionId(raw.sessionId)) return null
+      if (!Number.isSafeInteger(raw.seq) || (raw.seq as number) <= 0) return null
+      return raw as unknown as TcpFrame
+    case 'screen-frame':
+      if (!hasOnlyKeys(raw, ['type', 'sessionId', 'seq', 'width', 'height', 'len'])) return null
+      if (!isScreenSessionId(raw.sessionId) || !Number.isSafeInteger(raw.seq) || (raw.seq as number) <= 0) return null
+      if (!isScreenSize(raw.width, raw.height) || !Number.isSafeInteger(raw.len) || (raw.len as number) <= 0 || (raw.len as number) > SCREEN_MAX_FRAME_BYTES) return null
+      return raw as unknown as TcpFrame
     case 'pull':
       if (!hasOnlyKeys(raw, ['type', 'from', 'transferId', 'fileId', 'offset'])) return null
       if (!isBoundedString(raw.from, LIMITS.from)) return null

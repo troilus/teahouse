@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   CAPS,
@@ -116,6 +117,7 @@ interface Stack {
   discovery: Discovery
   messenger: Messenger
   queue: MemQueue
+  dedup: MemDedup
   profile: Profile
   port: number
   incoming: Envelope[]
@@ -134,18 +136,19 @@ async function makeStack(
   const registry = new PeerRegistry(profile.nodeId)
   const discovery = new Discovery({ udp, registry, profile, manualPeers, timings: FAST })
   const queue = new MemQueue()
+  const dedup = new MemDedup()
   const messenger = new Messenger({
     udp,
     registry,
     selfId: profile.nodeId,
     queue,
-    dedup: new MemDedup(),
+    dedup,
     timings: FAST
   })
   const incoming: Envelope[] = []
   messenger.on('incoming', (env: Envelope) => incoming.push(env))
   await udp.start()
-  const stack: Stack = { udp, registry, discovery, messenger, queue, profile, port, incoming }
+  const stack: Stack = { udp, registry, discovery, messenger, queue, dedup, profile, port, incoming }
   stacks.push(stack)
   return stack
 }
@@ -176,7 +179,7 @@ async function startTcpReceiver(stack: Stack): Promise<void> {
     stack.profile.tcpPort,
     {
       resolve: () => null,
-      receiveMessage: (env) => stack.messenger.acceptTcpEnvelope(env)
+      receiveMessage: (env, ip) => stack.messenger.acceptTcpEnvelope(env, ip)
     },
     '127.0.0.1'
   )
@@ -209,6 +212,49 @@ const emptyGroups = {
 } as unknown as GroupRepo
 
 describe('messenger 回环集成', () => {
+  it('屏幕控制跨 UDP/TCP 仅内存去重，错误来源不能抢占消息 ID 或修改联系人地址', async () => {
+    nextPort += 20
+    const a = await makeStack('alice', nextPort)
+    const b = await makeStack('bob', nextPort + 5)
+    a.registry.touch(b.profile.nodeId, '127.0.0.1', b.port, b.profile)
+    b.registry.touch(a.profile.nodeId, '127.0.0.1', a.port, a.profile)
+    const env = makeEnvelope(MSG_TYPES.screen, a.profile.nodeId, { op: 'request', sessionId: randomUUID() })
+    expect(b.messenger.acceptTcpEnvelope(env, '127.0.0.2')).toBe(false)
+    expect(b.messenger.acceptTcpEnvelope(env)).toBe(false)
+    expect(b.registry.get(a.profile.nodeId)?.ip).toBe('127.0.0.1')
+    await expect(a.messenger.sendReliable(b.profile.nodeId, env)).resolves.toBe(true)
+    expect(b.messenger.acceptTcpEnvelope(env, '::ffff:127.0.0.1')).toBe(true)
+    expect(b.incoming).toHaveLength(1)
+    expect(b.dedup.has(env.id)).toBe(false)
+    expect(a.queue.items).toEqual([])
+    expect(b.queue.items).toEqual([])
+    const unknown = makeEnvelope(MSG_TYPES.screen, 'unknown', { op: 'request', sessionId: randomUUID() })
+    a.udp.send(unknown, '127.0.0.1', b.port)
+    await sleep(40)
+    expect(b.incoming).toHaveLength(1)
+    expect(b.registry.get('unknown')).toBeUndefined()
+  })
+
+  it('取消屏幕邀请立即清除重试且不把在线联系人标成离线', async () => {
+    nextPort += 20
+    const a = await makeStack('alice', nextPort)
+    const b = await makeStack('bob', nextPort + 5)
+    a.registry.touch(b.profile.nodeId, '127.0.0.1', b.port, b.profile)
+    const send = vi.spyOn(a.udp, 'sendBuffer')
+    const abort = new AbortController()
+    const env = makeEnvelope(MSG_TYPES.screen, a.profile.nodeId, { op: 'request', sessionId: randomUUID() })
+    const pending = a.messenger.sendReliable(b.profile.nodeId, env, abort.signal)
+    abort.abort()
+    await expect(pending).resolves.toBe(false)
+    const count = send.mock.calls.length
+    await sleep(220)
+    expect(send).toHaveBeenCalledTimes(count)
+    expect(a.registry.get(b.profile.nodeId)?.online).toBe(true)
+    expect(a.queue.items).toEqual([])
+    await expect(a.messenger.sendReliable(b.profile.nodeId, env, abort.signal)).resolves.toBe(false)
+    expect(send).toHaveBeenCalledTimes(count)
+  })
+
   it('在线直达：ACK 确认，sendUserMessage 返回 sent', async () => {
     nextPort += 2
     const a = await makeStack('alice', nextPort)
