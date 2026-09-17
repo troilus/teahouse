@@ -171,25 +171,27 @@ const replyMeta = computed((): ReplyMeta => {
         :class="{ encrypted: props.msg.encrypted }"
         @contextmenu.prevent.stop="openMessageMenu"
       >
-        <template v-for="(part, partIndex) in parts" :key="partIndex">
-          <button
-            v-if="part.url"
-            class="text-link"
-            type="button"
-            @click.stop="openTextLink(part.url)"
-          >
-            {{ part.text }}
-          </button>
-          <span v-else>
-            <template
-              v-for="(emojiPart, emojiPartIndex) in splitEmojiText(part.text)"
-              :key="emojiPartIndex"
+        <span class="bubble-text">
+          <template v-for="(part, partIndex) in parts" :key="partIndex">
+            <button
+              v-if="part.url"
+              class="text-link"
+              type="button"
+              @click.stop="openTextLink(part.url)"
             >
-              <CompatEmoji v-if="emojiPart.emoji" :emoji="emojiPart.text" />
-              <span v-else>{{ emojiPart.text }}</span>
-            </template>
-          </span>
-        </template>
+              {{ part.text }}
+            </button>
+            <span v-else>
+              <template
+                v-for="(emojiPart, emojiPartIndex) in splitEmojiText(part.text)"
+                :key="emojiPartIndex"
+              >
+                <CompatEmoji v-if="emojiPart.emoji" :emoji="emojiPart.text" />
+                <span v-else>{{ emojiPart.text }}</span>
+              </template>
+            </span>
+          </template>
+        </span>
         <span
           v-if="props.msg.encrypted"
           class="encrypted-badge"
@@ -363,23 +365,26 @@ const replyMeta = computed((): ReplyMeta => {
   border-radius: 14px;
   font-size: 14px;
   line-height: 1.5;
+  user-select: text;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+/* 文字列：占满除锁标列外的宽度 */
+.bubble-text {
+  flex: 1;
+  min-width: 0;
   word-break: break-word;
   white-space: pre-wrap;
-  user-select: text;
-  position: relative;
 }
-/* 已加密气泡：右下角留出锁标空间 */
-.bubble.encrypted {
-  padding-bottom: 15px;
-}
+/* 锁标独占最后一列，与末行底部对齐 */
 .encrypted-badge {
-  position: absolute;
-  right: 6px;
-  bottom: 3px;
+  flex: 0 0 auto;
   display: inline-flex;
   color: var(--text-3);
   opacity: 0.72;
   pointer-events: none;
+  margin-bottom: 3px;
 }
 .row.peer .bubble {
   background: var(--bubble-peer);
