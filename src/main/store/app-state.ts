@@ -30,21 +30,6 @@ interface IdentityFile {
   wrappedPrivateKey?: string
   /** wrappedPrivateKey 是否为 safeStorage 密文；false/缺省表示明文回退 */
   wrappedPrivateKeyEnc?: boolean
-  // 旧版密码字段：保留以兼容历史 identity.json，不再使用
-  /** X25519 加密私钥（base64） */
-  encryptedPrivateKey?: string
-  /** 私钥加密 IV（base64） */
-  encryptedKeyIv?: string
-  /** 私钥加密认证标签（base64） */
-  encryptedKeyAuthTag?: string
-  /** 私钥加密 salt（base64） */
-  encryptedKeySalt?: string
-  /** 用户是否选择了"记住密码"（自动解密私钥） */
-  rememberPassword?: boolean
-  /** 加密后的密码哈希（用于验证"记住密码"的正确性） */
-  passwordHash?: string
-  /** safeStorage 加密后的密码（base64），rememberPassword=true 时存储 */
-  encryptedPassword?: string
 }
 
 export interface ConfigFile {

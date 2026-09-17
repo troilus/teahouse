@@ -1294,7 +1294,6 @@ if (!gotLock) {
 
       // 初始化端到端加密服务
       crypto = new CryptoService({
-        selfId: state.nodeId,
         identityPath: join(app.getPath('userData'), 'data', 'identity.json'),
         peerStore: {
           getPubKey: (nodeId: string) => peersRepo?.getPubKey(nodeId) ?? null,

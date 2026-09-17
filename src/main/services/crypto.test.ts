@@ -15,7 +15,6 @@ import {
   CryptoService,
   decryptFromPeer,
   encryptForPeer,
-  encryptForGroup,
   fingerprintFromPubKey,
   generateKeyPair,
   unwrapPrivateKey,
@@ -61,18 +60,13 @@ describe('X25519 + AES-256-GCM', () => {
     const bob = generateKeyPair()
     const carol = generateKeyPair()
 
-    const result = encryptForGroup(
-      '群消息',
-      new Map([
-        ['bob', bob.publicKey],
-        ['carol', carol.publicKey]
-      ]),
-      alice.privateKey
-    )
+    const forBob = encryptForPeer('群消息', bob.publicKey, alice.privateKey)
+    const forCarol = encryptForPeer('群消息', carol.publicKey, alice.privateKey)
 
-    expect(result.encryptedForMember.size).toBe(2)
-    expect(decryptFromPeer(result.encryptedForMember.get('bob')!, bob.privateKey)).toBe('群消息')
-    expect(decryptFromPeer(result.encryptedForMember.get('carol')!, carol.privateKey)).toBe('群消息')
+    expect(decryptFromPeer(forBob, bob.privateKey)).toBe('群消息')
+    expect(decryptFromPeer(forCarol, carol.privateKey)).toBe('群消息')
+    expect(decryptFromPeer(forBob, carol.privateKey)).toBeNull()
+    expect(decryptFromPeer(forCarol, bob.privateKey)).toBeNull()
   })
 })
 
@@ -87,7 +81,6 @@ describe('CryptoService 默认自动启用', () => {
     if (dir) dirs.push(dir)
     const identityPath = path ?? join(dir, 'identity.json')
     const svc = new CryptoService({
-      selfId: 'node-self',
       identityPath,
       peerStore: {
         getPubKey: () => null,

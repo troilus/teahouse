@@ -94,8 +94,6 @@ export interface E2eKeyPair {
 }
 
 export interface CryptoDeps {
-  /** 获取当前节点 ID */
-  selfId: string
   /** identity.json 文件路径（用于持久化密钥） */
   identityPath: string
   /** 对端公钥存储（peers 表） */
@@ -246,34 +244,6 @@ export function decryptFromPeer(
   }
 }
 
-// ─── 群聊加密 ────────────────────────────────────────────────────────────────
-
-export interface GroupEncryptedResult {
-  /** 接收方 nodeId → 加密后的载荷 */
-  encryptedForMember: Map<string, EncryptedPayload>
-}
-
-/**
- * 群聊 per-member 加密
- * 对每个成员分别做 X25519 协商 + AES-256-GCM 加密（与单聊同一套方案），
- * 保证接收方用 decryptFromPeer 即可解密。
- * 注：groups.ts 实际逐成员调用 encryptText，此函数为批量封装，保持接口一致。
- */
-export function encryptForGroup(
-  plaintext: string,
-  memberPubKeys: Map<string, string>,
-  senderPrivateKeyBase64: string
-): GroupEncryptedResult {
-  const encryptedForMember = new Map<string, EncryptedPayload>()
-  for (const [memberId, memberPubKeyBase64] of memberPubKeys) {
-    encryptedForMember.set(
-      memberId,
-      encryptForPeer(plaintext, memberPubKeyBase64, senderPrivateKeyBase64)
-    )
-  }
-  return { encryptedForMember }
-}
-
 // ─── 密钥交换服务 ────────────────────────────────────────────────────────────
 
 export interface E2eStatusView {
@@ -292,14 +262,6 @@ export class CryptoService extends EventEmitter {
     wrappedPrivateKey?: string
     /** wrappedPrivateKey 是否为 safeStorage 密文；false/缺省表示明文回退 */
     wrappedPrivateKeyEnc?: boolean
-    // 旧版密码字段：保留以兼容历史 identity.json，不再使用
-    encryptedPrivateKey?: string
-    encryptedKeyIv?: string
-    encryptedKeyAuthTag?: string
-    encryptedKeySalt?: string
-    rememberPassword?: boolean
-    passwordHash?: string
-    encryptedPassword?: string
   } | null = null
 
   constructor(deps: CryptoDeps) {
@@ -410,14 +372,6 @@ export class CryptoService extends EventEmitter {
     return fingerprintFromPubKey(pubKeyBase64)
   }
 
-  /** 设置当前节点的密钥对（启动时或密码解锁后调用） */
-  setKeyPair(kp: E2eKeyPair | null): void {
-    this.keyPair = kp
-    if (kp) {
-      this.emit('ready')
-    }
-  }
-
   /** 获取当前节点的密钥对 */
   getKeyPair(): E2eKeyPair | null {
     return this.keyPair
@@ -458,15 +412,6 @@ export class CryptoService extends EventEmitter {
   decryptText(payload: EncryptedPayload): string | null {
     if (!this.keyPair) return null
     return decryptFromPeer(payload, this.keyPair.privateKey)
-  }
-
-  /** 群聊加密：为每个在线成员分别加密 */
-  encryptGroupText(
-    plaintext: string,
-    memberPubKeys: Map<string, string>
-  ): GroupEncryptedResult | null {
-    if (!this.keyPair) return null
-    return encryptForGroup(plaintext, memberPubKeys, this.keyPair.privateKey)
   }
 
   /** 获取用于广播的公钥（base64） */
