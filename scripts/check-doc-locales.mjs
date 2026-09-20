@@ -13,6 +13,7 @@ export const DOCUMENT_PAIRS = [
   ['docs/protocol.md', 'docs/en/protocol.md'],
   ['docs/ui-design.md', 'docs/en/ui-design.md'],
   ['docs/tech-design.md', 'docs/en/tech-design.md'],
+  ['docs/e2e-encryption.md', 'docs/en/e2e-encryption.md'],
   ['docs/nwt-compat-design.md', 'docs/en/nwt-compat-design.md'],
   ['docs/optimization-plan.md', 'docs/en/optimization-plan.md']
 ]

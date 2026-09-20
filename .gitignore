@@ -29,8 +29,10 @@ references/iptux/
 
 # 面向开发的内部文档（本地保留，不公开到 GitHub）
 # docs/en/ 是公开英文文档；既有已跟踪中文设计文档继续由 Git 管理。
+# 端到端加密设计属于公开文档集，与 docs/en/ 英文版成对发布，故显式加入白名单。
 docs/*
 !docs/README.md
+!docs/e2e-encryption.md
 !docs/en/
 !docs/en/**
 AGENTS.md

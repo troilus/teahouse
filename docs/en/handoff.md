@@ -14,6 +14,10 @@ Image Viewer now offers Previous/Next canvas buttons across the full local histo
 
 OCR now starts manually on every platform and restores cached results directly as a native transparent text layer over the image. A single local Worker keeps inference off the viewer UI thread and cancels unfinished work on image changes/close. The separate OCR text panel is removed.
 
+> **Fork divergence — end-to-end encryption.** This fork keeps a local end-to-end encryption extension on top of the upstream baseline: X25519 key agreement plus AES-256-GCM over direct and group chat text, active only when both sides advertise the `e2e1` capability, with silent plaintext compatibility for stock upstream nodes and no switch involved. See the [end-to-end encryption design](e2e-encryption.md) for the design, threat model, handshake sequence and troubleshooting. The `e2e1` capability bit, the `key-exchange` message and the `peers.pub_key` / `messages.encrypted` columns are **local protocol and storage extensions** that the upstream protocol and technical-design documents intentionally do not cover. Every `[e2e]` debug log line is kept on purpose so the upstream pull request can be reproduced and verified, and should move behind a setting before a public release. This merge also hardened `PeerRegistry.touch` so a known peer public key survives a same-revision profile that omits `pubKey` (the database side already refuses to blank `peers.pub_key`, and encryption decisions read the database, so plaintext downgrade was never possible).
+>
+> Validation after the merge: `typecheck`, `test` (127 files / 862 tests), `test:db` (Electron ABI 110 on Node 16.17.1), `build` including the renderer bundle gates (public startup closure 87,435 bytes), isolated `smoke`, and `check:docs` (13 document pairs) all pass.
+
 ## 0. Reading order
 
 1. [Contributing](../../CONTRIBUTING.en.md) — repository hard constraints and delivery checklist.

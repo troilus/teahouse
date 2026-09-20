@@ -20,6 +20,7 @@
 | [协议](protocol.md) | 线上报文、时序、常量与兼容性 | [Protocol](en/protocol.md) |
 | [UI / 交互](ui-design.md) | 页面结构、关键流程、视觉 token | [UI and interaction](en/ui-design.md) |
 | [技术设计](tech-design.md) | 选型、分层、存储、风险与 CI | [Technical design](en/tech-design.md) |
+| [端到端加密](e2e-encryption.md) | 本地扩展的加密设计、威胁模型与排障 | [End-to-end encryption](en/e2e-encryption.md) |
 | [内网通兼容设计](nwt-compat-design.md) | 暂缓功能的隔离式兼容方案 | [Neiwangtong compatibility](en/nwt-compat-design.md) |
 | [代码优化方案](optimization-plan.md) | 优化项、状态与执行边界 | [Optimization plan](en/optimization-plan.md) |
 

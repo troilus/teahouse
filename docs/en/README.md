@@ -20,6 +20,7 @@ The established Simplified Chinese documents are the canonical product, protocol
 | [Protocol](protocol.md) | Wire messages, sequences, constants, and compatibility | [协议](../protocol.md) |
 | [UI and interaction](ui-design.md) | Layout, key flows, and visual tokens | [UI / 交互](../ui-design.md) |
 | [Technical design](tech-design.md) | Architecture, storage, risks, tests, and CI | [技术设计](../tech-design.md) |
+| [End-to-end encryption](e2e-encryption.md) | Local E2E extension: design, threat model, troubleshooting | [端到端加密](../e2e-encryption.md) |
 | [Neiwangtong compatibility](nwt-compat-design.md) | Paused compatibility-mode design | [内网通兼容设计](../nwt-compat-design.md) |
 | [Optimization plan](optimization-plan.md) | Optimization status and execution boundaries | [代码优化方案](../optimization-plan.md) |
 
