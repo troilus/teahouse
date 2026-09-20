@@ -173,6 +173,31 @@ describe('PeerRegistry 节点状态', () => {
     expect(registry.get(before.nodeId)?.profile).toEqual(next)
   })
 
+  it('资料未携带公钥时保留已协商的对端公钥（本地 e2e 扩展）', () => {
+    const registry = new PeerRegistry('node-self')
+    const withKey = { ...profile('node-bob', 'Bob', 3), pubKey: 'PUBKEY-A' }
+    registry.touch('node-bob', '127.0.0.1', 10001, withKey, 100)
+
+    // 同版本、时间戳更新但未携带 pubKey 的广播不得清空已记录的公钥
+    registry.touch('node-bob', '127.0.0.1', 10001, profile('node-bob', 'Bob', 3), 200)
+    expect(registry.get('node-bob')?.profile.pubKey).toBe('PUBKEY-A')
+
+    // 对端确实换钥时（pubKey 非空）照常覆盖
+    registry.touch('node-bob', '127.0.0.1', 10001, { ...profile('node-bob', 'Bob', 3), pubKey: 'PUBKEY-B' }, 300)
+    expect(registry.get('node-bob')?.profile.pubKey).toBe('PUBKEY-B')
+
+    // 更高 profileRev 的资料同样保留公钥，并照常更新其他字段
+    registry.touch('node-bob', '127.0.0.1', 10001, profile('node-bob', 'Bob 改名', 4), 400)
+    expect(registry.get('node-bob')?.profile).toMatchObject({ nick: 'Bob 改名', profileRev: 4, pubKey: 'PUBKEY-B' })
+  })
+
+  it('双方都没有公钥时不引入 pubKey 键（避免资料比对永久失配）', () => {
+    const registry = new PeerRegistry('node-self')
+    registry.touch('node-carol', '127.0.0.1', 10002, profile('node-carol', 'Carol'), 100)
+    registry.touch('node-carol', '127.0.0.1', 10002, profile('node-carol', 'Carol'), 200)
+    expect('pubKey' in registry.get('node-carol')!.profile).toBe(false)
+  })
+
   it('sweep 只把超时在线节点标为离线', () => {
     vi.useFakeTimers()
     vi.setSystemTime(10_000)

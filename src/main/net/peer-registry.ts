@@ -77,7 +77,13 @@ export class PeerRegistry extends EventEmitter {
     const ordered = profileTs === undefined || !this.profileTimes.has(nodeId) ||
       profileTs > this.profileTimes.get(nodeId)!
     if (profile && (newer || (sameRevision && ((ordered && !this.profileConfirmationOnly.has(nodeId)) || confirmed)))) {
-      if (!isDeepStrictEqual(profile, existing.profile)) {
+      // 本地 e2e 扩展：资料未携带公钥时沿用已知公钥，避免同版本覆盖把内存节点表的公钥清空
+      // （清空会让界面指纹与搜索结果瞬间丢失，同时让内存态与 peers.pub_key 不一致；
+      // 加密决策读的是数据库，数据库另有 "空值不覆盖" 保护，所以这里只影响展示与一致性）。
+      // pubKey 不参与 profileRev 协商，非空值仍照常覆盖，保证对端换钥能生效。
+      const knownPubKey = existing.profile.pubKey
+      const nextProfile = profile.pubKey || !knownPubKey ? profile : { ...profile, pubKey: knownPubKey }
+      if (!isDeepStrictEqual(nextProfile, existing.profile)) {
         changed = true
       }
       if (newer) this.profileConfirmationOnly.delete(nodeId)
@@ -85,7 +91,7 @@ export class PeerRegistry extends EventEmitter {
         // 发送端时钟回拨后，同版本仅接受关联应答，防旧时钟报文再次覆盖。
         this.profileConfirmationOnly.add(nodeId)
       }
-      existing.profile = profile
+      existing.profile = nextProfile
       if (profileTs !== undefined) this.profileTimes.set(nodeId, profileTs)
     }
     existing.lastSeen = now
