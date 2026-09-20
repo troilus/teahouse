@@ -4,8 +4,8 @@
 
 | Field | Value |
 |---|---|
-| Status | v0.60.0 local diagnostics implemented (#315); physical remote-view platform acceptance remains pending |
-| Updated | 2026-09-17 |
+| Status | v0.60.1 contact profile synchronization fixed (#316); physical remote-view platform acceptance remains pending |
+| Updated | 2026-09-18 |
 | Authority | The [Chinese requirements document](../requirements.md) is the canonical feature and decision record. This document translates the current effective requirements. |
 
 ## 1. Product goals
@@ -264,3 +264,11 @@ Decision #312 (v0.59.0): confirm the explanation and target before sending a req
 Version 0.60.0 adds Settings → About → Diagnostics and feedback. Export a local ZIP, copy a redacted environment summary and reveal the saved file. No uploads. Explicit lifecycle/error metadata only; never chat/file/image/clipboard content, credentials or raw error messages. Keep up to seven days and 10 MiB, with bounded asynchronous buffers and repetition suppression. Default node/address aliases; optionally include addresses observed during this run. Preserve evidence of an unclean previous exit. Include a bug-report template and log locations. Native crashes may provide no stack; no memory dumps, continuous monitoring or automatic repair.
 
 - 2026-09-17: Decision #315, application **0.60.0**; diagnostics design recorded before implementation.
+
+- 2026-09-18: Decision #316, application **0.60.1**: fix contact refresh after independent company, department, team or avatar changes. Profile saves and runtime capability changes share a monotonic persisted revision. Changed full profiles at the same revision also trigger the existing UI and database updates. Duplicate content stays quiet; older revisions and online source-address changes remain rejected. No new polling, wire fields, dependencies or schema changes.
+
+## Discovery and scan reliability (decision #317, v0.60.2)
+
+Unknown heartbeats trigger throttled full-profile handshakes. Optional `probeId` in entry/alive and capability `dp1` correlate fresh replies; directed replies bypass discovery jitter with a one-second per-peer limit. Active probes use a two-second deadline with one retry for dp1 peers, or twenty seconds with a retry at ten seconds for legacy peers. Equal profile revisions use sender timestamps to reject delayed data; a matching fresh reply resolves clock rollback/ties. Legacy peers without correlation retain best-effort timestamp ordering.
+
+Global, single-range and background scans share one queue: manual work takes priority while background progress is retained. Minimum address delays remain 8ms/62ms. Completion records the scan time and schedules the next round after twelve hours plus thirty-to-ninety-minute jitter; restart, deletion, eligibility and shutdown are checked. Range advertisements require an online peer and matching source IP/UDP port. Gossip sends at most one packet per target per 50ms and coalesces duplicate requests. Bridges distribute addresses; endpoints still require direct UDP/TCP reachability. No dependencies or database migrations are added.

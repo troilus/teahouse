@@ -40,6 +40,9 @@ export function isAvatarPresetValue(value: unknown): value is number {
   )
 }
 
+/** 仅发现层使用，独立导出避免扩大渲染层能力常量闭包（#317） */
+export const DISCOVERY_PROBE_CAP = 'dp1'
+
 /** 时序参数（protocol §9）。测试中可整体注入缩短。 */
 export const TIMINGS = {
   presenceInterval: 30_000,
@@ -53,6 +56,11 @@ export const TIMINGS = {
   aliveDedupWindow: 10_000,
   /** 探活超时（§6.2 按需探活） */
   probeTimeout: 2_000,
+  /** 旧端需覆盖 10s 去重与最多 8s 应答抖动 */
+  legacyProbeTimeout: 20_000,
+  profileProbeInterval: 10_000,
+  directedReplyInterval: 1_000,
+  gossipPacketInterval: 50,
   /** msg 的 ACK 退避重传间隔（§7.2）：发送后依次等待，仍无 ACK 即入补发队列 */
   ackRetrySchedule: [1_000, 2_000, 4_000] as number[],
   /** 补发队列保留时长 / 单节点上限（决议 #6） */
@@ -209,6 +217,8 @@ export interface Envelope<T = unknown> {
 /** entry / alive / profile 的载荷 */
 export interface ProfilePayload {
   profile: Profile
+  /** entry 请求携带，alive 原样回传；旧端可忽略 */
+  probeId?: string
 }
 
 /** presence 心跳载荷（§6.2） */

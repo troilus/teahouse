@@ -171,9 +171,12 @@ describe('RangeSync 入站过滤', () => {
   it('只接收已知 scan-ranges，并过滤非法与重复 CIDR', () => {
     const udp = fakeUdp()
     const acceptRanges = vi.fn()
+    const registry = new PeerRegistry('node-alice')
+    registry.touch('node-bob', '127.0.0.1', 17878, profile('bob', 17878))
+    const source = { address: '127.0.0.1', port: 17878 }
     new RangeSync({
       udp: udp as unknown as UdpChannel,
-      registry: new PeerRegistry('node-alice'),
+      registry,
       selfId: 'node-alice',
       getRanges: () => [],
       acceptRanges
@@ -191,8 +194,12 @@ describe('RangeSync 入站过滤', () => {
 
     udp.emit('envelope', makeEnvelope(MSG_TYPES.scanRanges, 'node-bob', payload), false)
     udp.emit('envelope', makeEnvelope(MSG_TYPES.scanRanges, 'node-alice', payload), true)
-    udp.emit('envelope', makeEnvelope(MSG_TYPES.scanRanges, 'node-bob', payload), true)
+    udp.emit('envelope', makeEnvelope(MSG_TYPES.scanRanges, 'node-bob', payload), true, source)
 
+    udp.emit('envelope', makeEnvelope(MSG_TYPES.scanRanges, 'unknown', payload), true, source)
+    udp.emit('envelope', makeEnvelope(MSG_TYPES.scanRanges, 'node-bob', payload), true, { ...source, port: 2 })
+    registry.markOffline('node-bob')
+    udp.emit('envelope', makeEnvelope(MSG_TYPES.scanRanges, 'node-bob', payload), true, source)
     expect(acceptRanges).toHaveBeenCalledTimes(1)
     expect(acceptRanges).toHaveBeenCalledWith('node-bob', [
       { cidr: '10.1.2.0/24', addedAt: 1 },
@@ -226,4 +233,19 @@ describe('RangeSync 回环同步', () => {
     expect(bob.accepted[0].ranges[1].addedAt).toBeGreaterThan(0)
     expect(bob.accepted[0].ranges).toHaveLength(2)
   })
+})
+
+// 实际 UDP 来源也必须匹配已发现节点。
+it('回环拒绝陌生发送者与同 nodeId 不同端口的网段', async () => {
+  const alice = await makeNode('alice'), bob = await makeNode('bob'), other = await makeNode('other')
+  const env = makeEnvelope(MSG_TYPES.scanRanges, bob.profile.nodeId, { ranges: [{ cidr: '127.0.0.0/30', addedAt: 1 }] })
+  bob.udp.send(env, '127.0.0.1', alice.port)
+  await sleep(30)
+  expect(alice.accepted).toHaveLength(0)
+  alice.registry.touch(bob.profile.nodeId, '127.0.0.1', bob.port, bob.profile)
+  other.udp.send(env, '127.0.0.1', alice.port)
+  await sleep(30)
+  expect(alice.accepted).toHaveLength(0)
+  bob.udp.send(env, '127.0.0.1', alice.port)
+  await waitFor(() => alice.accepted.length === 1)
 })

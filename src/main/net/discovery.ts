@@ -1,5 +1,7 @@
 import type { RemoteInfo } from 'node:dgram'
+import { isDeepStrictEqual } from 'node:util'
 import {
+  DISCOVERY_PROBE_CAP,
   GOSSIP_FANOUT,
   MSG_TYPES,
   PEERS_PER_PACKET,
@@ -34,6 +36,31 @@ export interface DiscoveryOptions {
   peerClock?: PeerClock
 }
 
+export interface ScanOptions {
+  key?: string
+  background?: boolean
+  shouldRun?: () => boolean
+  onProgress?: (done: number) => void
+  onComplete?: () => void
+  onCancel?: () => void
+}
+
+interface ScanTask extends ScanOptions {
+  hosts: string[]
+  port: number
+  delay: number
+  index: number
+}
+
+interface ProfileRequest {
+  id: string
+  ip: string
+  port: number
+  timer: ReturnType<typeof setTimeout>
+  retry: ReturnType<typeof setTimeout>
+  active: boolean
+}
+
 /**
  * 发现服务（protocol §6）：entry/alive/exit/presence 的全部时序逻辑。
  * 不依赖 Electron —— vitest 里两个实例对发即可集成测试。
@@ -46,12 +73,19 @@ export class Discovery {
   private readonly t: Timings
   private readonly peerClock?: PeerClock
 
+  private stopped = false
   private presenceSeq = 0
   private presenceTimer: ReturnType<typeof setInterval> | null = null
   private sweepTimer: ReturnType<typeof setInterval> | null = null
   private gossipTimer: ReturnType<typeof setInterval> | null = null
   private scanTimer: ReturnType<typeof setTimeout> | null = null
-  private scanGeneration = 0
+  private readonly scans: ScanTask[] = []
+  private nextScanAt = 0
+  private readonly gossipSends = new Map<string, ReturnType<typeof setTimeout>>()
+  private readonly cacheTimers = new Set<ReturnType<typeof setTimeout>>()
+  private readonly profileRequests = new Map<string, ProfileRequest>()
+  private readonly lastProfileProbe = new Map<string, number>()
+  private readonly lastDirectedReply = new Map<string, number>()
   private readonly pendingReplies = new Map<string, ReturnType<typeof setTimeout>>()
   /** nodeId → 最近一次发 alive 的时间（§6.1 去重应答，防批量开机风暴） */
   private readonly lastAliveAt = new Map<string, number>()
@@ -66,12 +100,12 @@ export class Discovery {
     this.t = { ...TIMINGS, ...opts.timings }
     this.peerClock = opts.peerClock
     this.udp.on('envelope', (env: Envelope, known: boolean, rinfo: RemoteInfo) => {
-      if (known) this.handle(env, rinfo)
+      if (known && !this.stopped) this.handle(env, rinfo)
       // 未知类型按协议忽略（向前兼容）
     })
     // 结识即交换（§6.3）：首次得知某节点在线 → 把我已知的在线节点摘要告诉它
     this.registry.on('online', (nodeId: string) => {
-      if (this.gossiped.has(nodeId)) return
+      if (this.stopped || this.gossiped.has(nodeId)) return
       this.gossiped.add(nodeId)
       this.sendPeersTo(nodeId)
     })
@@ -82,6 +116,7 @@ export class Discovery {
   }
 
   start(): void {
+    this.stopped = false
     this.udp.broadcast(this.envEntry())
     for (const peer of this.manualPeers) {
       this.udp.send(this.envEntry(), peer.host, peer.port)
@@ -101,21 +136,36 @@ export class Discovery {
       .values()
       .filter((r) => !r.online && now - r.lastSeen < this.t.peerCacheProbeTtl)
     stale.forEach((record, i) => {
-      const timer = setTimeout(() => this.probe(record.ip, record.udpPort), 50 * i)
+      const timer = setTimeout(() => {
+        this.cacheTimers.delete(timer)
+        this.probe(record.ip, record.udpPort)
+      }, 50 * i)
+      this.cacheTimers.add(timer)
       timer.unref?.()
     })
   }
 
   /** 退出：广播 exit，并对在线节点逐个单播（跨网段节点收不到广播，protocol §6.1） */
   stop(): void {
+    if (this.stopped) return
+    this.stopped = true
     if (this.presenceTimer) clearInterval(this.presenceTimer)
     if (this.sweepTimer) clearInterval(this.sweepTimer)
     if (this.gossipTimer) clearInterval(this.gossipTimer)
-    this.scanGeneration += 1
     if (this.scanTimer) {
       clearTimeout(this.scanTimer)
       this.scanTimer = null
     }
+    for (const task of this.scans.splice(0)) task.onCancel?.()
+    for (const timer of this.gossipSends.values()) clearTimeout(timer)
+    this.gossipSends.clear()
+    for (const timer of this.cacheTimers) clearTimeout(timer)
+    this.cacheTimers.clear()
+    for (const id of this.profileRequests.keys()) this.clearProfileRequest(id)
+    this.lastProfileProbe.clear()
+    this.lastDirectedReply.clear()
+    this.lastAliveAt.clear()
+    this.gossiped.clear()
     for (const timer of this.pendingReplies.values()) clearTimeout(timer)
     this.pendingReplies.clear()
 
@@ -128,6 +178,7 @@ export class Discovery {
 
   /** 按需探活（F-DISC-8）：复用 entry，对方回 alive 即在线 */
   probe(host: string, port: number): void {
+    if (this.stopped) return
     this.udp.send(this.envEntry(), host, port)
   }
 
@@ -143,26 +194,35 @@ export class Discovery {
 
   /** 把我已知的在线节点摘要（排除自己与对方）分包单播给目标 */
   private sendPeersTo(nodeId: string): void {
-    const target = this.registry.get(nodeId)
-    if (!target) return
-    const summaries: PeerSummary[] = this.registry
-      .values()
-      .filter((r) => r.online && r.profile.nodeId !== nodeId)
-      .map((r) => ({
-        nodeId: r.profile.nodeId,
-        ip: r.ip,
-        udpPort: r.udpPort,
-        tcpPort: r.profile.tcpPort,
-        lastSeen: r.lastSeen
+    if (this.gossipSends.has(nodeId)) return
+    let index = 0
+    const tick = (): void => {
+      const target = this.registry.get(nodeId)
+      if (!target?.online) {
+        this.gossipSends.delete(nodeId)
+        return
+      }
+      // 按需取一包，避免每个目标各缓存一份千人列表；变化由后续周期补齐。
+      const peers = this.registry.values().filter(r => r.online && r.profile.nodeId !== nodeId)
+      const summaries: PeerSummary[] = peers.slice(index, index + PEERS_PER_PACKET).map(r => ({
+        nodeId: r.profile.nodeId, ip: r.ip, udpPort: r.udpPort,
+        tcpPort: r.profile.tcpPort, lastSeen: r.lastSeen
       }))
-    for (let i = 0; i < summaries.length; i += PEERS_PER_PACKET) {
-      const payload: PeersPayload = { peers: summaries.slice(i, i + PEERS_PER_PACKET) }
-      this.udp.send(
-        makeEnvelope(MSG_TYPES.peers, this.selfId, payload),
-        target.ip,
-        target.udpPort
-      )
+      if (summaries.length > 0) {
+        this.udp.send(makeEnvelope<PeersPayload>(MSG_TYPES.peers, this.selfId, { peers: summaries }), target.ip, target.udpPort)
+      }
+      index += PEERS_PER_PACKET
+      if (index >= peers.length) {
+        this.gossipSends.delete(nodeId)
+        return
+      }
+      const timer = setTimeout(tick, this.t.gossipPacketInterval)
+      this.gossipSends.set(nodeId, timer)
+      timer.unref?.()
     }
+    const timer = setTimeout(tick, 0)
+    this.gossipSends.set(nodeId, timer)
+    timer.unref?.()
   }
 
   /** 资料变更广播（向导/设置保存后）：同网段即时刷新；跨网段靠 presence 的 rev 失配兜底 */
@@ -179,43 +239,102 @@ export class Discovery {
 
   /** 探活已知节点；未知节点返回 false */
   probeNode(nodeId: string): boolean {
+    if (this.stopped) return false
     const record = this.registry.get(nodeId)
     if (!record) return false
-    this.probe(record.ip, record.udpPort)
+    this.requestProfile(nodeId, record.ip, record.udpPort, true)
     return true
   }
 
-  /** 网段定向扫描（F-DISC-2 第二板斧）：错峰单播 entry，≤125 地址/秒；返回扫描地址数 */
-  scanHosts(hosts: string[], port: number, hostDelayMs = 8): number {
-    this.scanGeneration += 1
-    if (this.scanTimer) {
+  /** 所有网段扫描共用队列；手动优先，后台任务保留游标。 */
+  scanHosts(hosts: string[], port: number, hostDelayMs = 8, opts: ScanOptions = {}): number {
+    if (this.stopped || hosts.length === 0) return 0
+    const existing = opts.key && this.scans.find(task => task.key === opts.key)
+    if (existing) return existing.hosts.length
+    this.scans.push({ ...opts, hosts: [...hosts], port, delay: Math.max(8, hostDelayMs), index: 0 })
+    this.scheduleScan(0)
+    return hosts.length
+  }
+
+  cancelScan(key: string): void {
+    for (const task of [...this.scans]) {
+      if (task.key !== key) continue
+      this.scans.splice(this.scans.indexOf(task), 1)
+      task.onCancel?.()
+    }
+    if (this.scans.length === 0 && this.scanTimer) {
       clearTimeout(this.scanTimer)
       this.scanTimer = null
     }
-    if (hosts.length === 0) return 0
+  }
 
-    const generation = this.scanGeneration
-    const delay = Math.max(0, hostDelayMs)
-    let index = 0
-    const tick = (): void => {
-      if (generation !== this.scanGeneration) return
-      if (index >= hosts.length) {
-        this.scanTimer = null
+  private scheduleScan(delay: number): void {
+    if (this.scanTimer || this.scans.length === 0) return
+    this.scanTimer = setTimeout(() => {
+      this.scanTimer = null
+      const task = this.scans.find(item => !item.background) ?? this.scans[0]
+      if (!task) return
+      if (task.shouldRun && !task.shouldRun()) {
+        this.scans.splice(this.scans.indexOf(task), 1)
+        task.onCancel?.()
+        this.scheduleScan(0)
         return
       }
-      const host = hosts[index]
-      this.probe(host, port)
-      index += 1
-      if (index >= hosts.length) {
-        this.scanTimer = null
-        return
+      this.nextScanAt = Date.now() + task.delay
+      this.probe(task.hosts[task.index], task.port)
+      task.index += 1
+      task.onProgress?.(task.index)
+      if (task.index === task.hosts.length) {
+        this.scans.splice(this.scans.indexOf(task), 1)
+        // 先保留下一发的间隔，完成回调可安全加入下一任务。
+        this.scheduleScan(task.delay)
+        task.onComplete?.()
       }
-      this.scanTimer = setTimeout(tick, delay)
-      this.scanTimer.unref?.()
-    }
-    this.scanTimer = setTimeout(tick, 0)
+      this.scheduleScan(task.delay)
+    }, Math.max(delay, this.nextScanAt - Date.now()))
     this.scanTimer.unref?.()
-    return hosts.length
+  }
+
+  private clearProfileRequest(nodeId: string): void {
+    const request = this.profileRequests.get(nodeId)
+    if (!request) return
+    clearTimeout(request.timer)
+    clearTimeout(request.retry)
+    this.profileRequests.delete(nodeId)
+  }
+
+  private requestProfile(nodeId: string, ip: string, port: number, active = false): void {
+    const existing = this.profileRequests.get(nodeId)
+    if (existing) {
+      if (existing.ip === ip && existing.port === port) existing.active ||= active
+      return
+    }
+    const now = Date.now()
+    if (!active && now - (this.lastProfileProbe.get(nodeId) ?? -Infinity) < this.t.profileProbeInterval) return
+    if (this.profileRequests.size >= 1024) return
+    // 仅保留有界节流记录，避免陌生心跳不断生成身份占用内存。
+    if (this.lastProfileProbe.size >= 1024) this.lastProfileProbe.delete(this.lastProfileProbe.keys().next().value!)
+    this.lastProfileProbe.set(nodeId, now)
+    const record = this.registry.get(nodeId)
+    const fast = record?.profile.caps.includes(DISCOVERY_PROBE_CAP)
+    const timeout = fast ? this.t.probeTimeout : this.t.legacyProbeTimeout
+    const env = this.envEntry()
+    env.payload.probeId = env.id
+    const request: ProfileRequest = {
+      id: env.id, ip, port, active,
+      retry: setTimeout(() => this.udp.send(env, ip, port), fast ? timeout / 2 : this.t.aliveDedupWindow),
+      timer: setTimeout(() => {
+        this.clearProfileRequest(nodeId)
+        const current = this.registry.get(nodeId)
+        if (request.active && current?.ip === ip && current.udpPort === port && current.lastSeen <= now) {
+          this.registry.markOffline(nodeId)
+        }
+      }, timeout)
+    }
+    this.profileRequests.set(nodeId, request)
+    request.timer.unref?.()
+    request.retry.unref?.()
+    this.udp.send(env, ip, port)
   }
 
   private envEntry(): Envelope<ProfilePayload> {
@@ -236,39 +355,42 @@ export class Discovery {
   private handle(env: Envelope, rinfo: RemoteInfo): void {
     if (env.from === this.selfId) return // 自己的广播回环
 
-    // 实时发现报文校准时钟偏移（决议 #65）：entry/alive/profile/presence 均即时发出，
-    // 其 ts ≈ 本机收到时刻，是估算对端时钟差最稳的来源（聊天消息可能稀疏）。
-    this.peerClock?.observe(env.from, env.ts, Date.now())
-
     switch (env.type) {
-      case MSG_TYPES.entry: {
-        const { profile } = env.payload as ProfilePayload
-        if (profile.nodeId !== env.from) break
-        console.log(`[e2e] recv entry from ${env.from}, pubKey=${profile.pubKey ? 'yes' : 'no'}, caps=${profile.caps.join(',')}`)
-        if (this.registry.touch(env.from, rinfo.address, rinfo.port, profile)) {
-          this.scheduleAliveReply(env.from, rinfo)
-        }
-        break
-      }
+      case MSG_TYPES.entry:
       case MSG_TYPES.alive:
       case MSG_TYPES.profile: {
-        const { profile } = env.payload as ProfilePayload
+        const { profile, probeId } = env.payload as ProfilePayload
         if (profile.nodeId !== env.from) break
         console.log(`[e2e] recv ${env.type} from ${env.from}, pubKey=${profile.pubKey ? 'yes' : 'no'}, caps=${profile.caps.join(',')}`)
-        this.registry.touch(env.from, rinfo.address, rinfo.port, profile)
+        const request = this.profileRequests.get(env.from)
+        const confirmed = env.type === MSG_TYPES.alive && !!probeId && request?.id === probeId &&
+          request.ip === rinfo.address && request.port === rinfo.port
+        const record = this.registry.touch(env.from, rinfo.address, rinfo.port, profile, env.ts, confirmed)
+        if (!record) break
+        this.peerClock?.observe(env.from, env.ts, Date.now())
+        if (confirmed || (request && request.ip === rinfo.address && request.port === rinfo.port &&
+          !profile.caps.includes(DISCOVERY_PROBE_CAP) && env.type === MSG_TYPES.alive)) {
+          this.clearProfileRequest(env.from)
+        }
+        if (profile.profileRev === record.profile.profileRev && !isDeepStrictEqual(profile, record.profile)) {
+          this.requestProfile(env.from, rinfo.address, rinfo.port)
+        }
+        if (env.type === MSG_TYPES.entry) this.scheduleAliveReply(env.from, rinfo, probeId)
         break
       }
       case MSG_TYPES.exit: {
-        this.registry.markOffline(env.from)
+        const peer = this.registry.get(env.from)
+        if (peer?.ip === rinfo.address && peer.udpPort === rinfo.port) this.registry.markOffline(env.from)
         break
       }
       case MSG_TYPES.presence: {
         const presence = env.payload as PresencePayload
         const knownRev = this.registry.profileRevOf(env.from)
         const touched = this.registry.touch(env.from, rinfo.address, rinfo.port)
-        if (touched && knownRev !== -1 && presence.profileRev !== knownRev) {
-          // 资料版本失配 → 发 entry 触发对方回 alive（全量资料），§6.2 防"机器换人"
-          this.udp.send(this.envEntry(), rinfo.address, rinfo.port)
+        if (touched) this.peerClock?.observe(env.from, env.ts, Date.now())
+        const peer = this.registry.get(env.from)
+        if ((touched && presence.profileRev !== knownRev) || !peer || (!peer.online && !touched)) {
+          this.requestProfile(env.from, rinfo.address, rinfo.port)
         }
         break
       }
@@ -290,8 +412,16 @@ export class Discovery {
   }
 
   /** entry 应答：规模自适应抖动 + 10s 去重（protocol §6.1 批量开机风暴对策） */
-  private scheduleAliveReply(nodeId: string, rinfo: RemoteInfo): void {
+  private scheduleAliveReply(nodeId: string, rinfo: RemoteInfo, probeId?: string): void {
     const now = Date.now()
+    if (probeId) {
+      if (now - (this.lastDirectedReply.get(nodeId) ?? -Infinity) < this.t.directedReplyInterval) return
+      this.lastDirectedReply.set(nodeId, now)
+      this.udp.send(makeEnvelope<ProfilePayload>(MSG_TYPES.alive, this.selfId, {
+        profile: this.profile, probeId
+      }), rinfo.address, rinfo.port)
+      return
+    }
     const last = this.lastAliveAt.get(nodeId) ?? 0
     if (now - last < this.t.aliveDedupWindow) return
     if (this.pendingReplies.has(nodeId)) return

@@ -150,6 +150,29 @@ describe('PeerRegistry 节点状态', () => {
     expect(registry.get('node-bob')?.profile).toMatchObject({ nick: 'Bob v3', profileRev: 3 })
   })
 
+  it.each<Partial<Profile>>([
+    { company: '新公司' }, { dept: '新部门' }, { team: '新团队' },
+    { avatar: 3 }, { avatarHash: 'a'.repeat(64) }, { nick: '新昵称' },
+    { host: '新主机' }, { platform: 'win' }, { tcpPort: 18889 },
+    { ver: '0.60.1' }, { caps: ['rv1'] }
+  ])('同版本资料变化 %j 通知一次，重复/旧资料与聊天探活不重复通知', (patch) => {
+    const registry = new PeerRegistry('node-self')
+    const before = profile('node-bob', 'Bob', 2)
+    registry.touch(before.nodeId, '127.0.0.1', 10001, before)
+    const updated = vi.fn(() => ({ ...registry.get(before.nodeId)!.profile }))
+    registry.on('updated', updated)
+
+    const next = { ...before, ...patch }
+    registry.touch(before.nodeId, '127.0.0.1', 10001, next)
+    expect(updated).toHaveBeenCalledTimes(1)
+    expect(updated.mock.results[0].value).toEqual(next)
+    registry.touch(before.nodeId, '127.0.0.1', 10001, { ...next, caps: [...next.caps] })
+    registry.touch(before.nodeId, '127.0.0.1', 10001, { ...before, profileRev: 1 })
+    registry.touch(before.nodeId, '127.0.0.1', 10001)
+    expect(updated).toHaveBeenCalledTimes(1)
+    expect(registry.get(before.nodeId)?.profile).toEqual(next)
+  })
+
   it('sweep 只把超时在线节点标为离线', () => {
     vi.useFakeTimers()
     vi.setSystemTime(10_000)

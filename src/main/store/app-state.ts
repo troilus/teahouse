@@ -174,6 +174,21 @@ export interface ProfilePatch {
   fileDir: string
 }
 
+/** 资料与运行时能力共用持久版本，避免保存资料时重用或回退已广播的版本。 */
+function saveProfileRevision(state: AppState, changed: boolean): void {
+  state.config.profileRev = Math.max(state.config.profileRev, state.profile.profileRev) + (changed ? 1 : 0)
+  atomicWriteJson(state.configPath, state.config)
+  state.profile.profileRev = state.config.profileRev
+}
+
+/** 动态能力只持久化版本；不改变首次向导状态，重复通知不写盘。 */
+export function saveProfileCaps(state: AppState, caps: string[]): boolean {
+  if (caps.length === state.profile.caps.length && caps.every((cap, i) => cap === state.profile.caps[i])) return false
+  saveProfileRevision(state, true)
+  state.profile.caps = [...caps]
+  return true
+}
+
 /**
  * 保存向导/设置提交的资料：资料字段有变则 profileRev+1（触发全网刷新），
  * 同步原地更新 profile 对象（discovery 持引用，presence 立即携带新 rev）。
@@ -202,8 +217,7 @@ export function saveProfile(state: AppState, patch: ProfilePatch): void {
   config.avatarHash = nextAvatarHash
   config.fileDir = patch.fileDir
   config.setupDone = true
-  if (profileChanged) config.profileRev += 1
-  atomicWriteJson(state.configPath, config)
+  saveProfileRevision(state, profileChanged)
 
   profile.nick = config.nick
   profile.company = config.company
@@ -211,7 +225,6 @@ export function saveProfile(state: AppState, patch: ProfilePatch): void {
   profile.team = config.team
   profile.avatar = config.avatar
   profile.avatarHash = config.avatarHash || undefined
-  profile.profileRev = config.profileRev
 }
 
 /** 保存应用级设置（通知开关 / 手动节点 / 扫描网段），与资料保存互不影响 */

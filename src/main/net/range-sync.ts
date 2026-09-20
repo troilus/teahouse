@@ -1,3 +1,4 @@
+import type { RemoteInfo } from 'node:dgram'
 import {
   MSG_TYPES,
   SCAN_RANGES_PER_PACKET,
@@ -46,8 +47,8 @@ export class RangeSync {
     this.getRanges = opts.getRanges
     this.acceptRanges = opts.acceptRanges
     this.t = { ...TIMINGS, ...opts.timings }
-    this.udp.on('envelope', (env: Envelope, known: boolean) => {
-      if (known && env.type === MSG_TYPES.scanRanges) this.handle(env)
+    this.udp.on('envelope', (env: Envelope, known: boolean, rinfo: RemoteInfo) => {
+      if (known && env.type === MSG_TYPES.scanRanges) this.handle(env, rinfo)
     })
     this.registry.on('online', (nodeId: string) => this.scheduleShareTo(nodeId))
   }
@@ -120,8 +121,10 @@ export class RangeSync {
     }
   }
 
-  private handle(env: Envelope): void {
+  private handle(env: Envelope, rinfo: RemoteInfo): void {
     if (env.from === this.selfId) return
+    const peer = this.registry.get(env.from)
+    if (!peer?.online || peer.ip !== rinfo.address || peer.udpPort !== rinfo.port) return
     const payload = env.payload as ScanRangesPayload
     const ranges: ScanRangeSummary[] = []
     const seen = new Set<string>()

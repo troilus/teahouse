@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  DISCOVERY_PROBE_CAP,
   MSG_TYPES,
   type PeersPayload,
   type Profile,
@@ -31,7 +32,7 @@ function makeProfile(name: string, port: number): Profile {
     platform: 'linux',
     tcpPort: port + 1,
     ver: '0.0.0-test',
-    caps: []
+    caps: [DISCOVERY_PROBE_CAP]
   }
 }
 
@@ -52,7 +53,12 @@ const FAST: Partial<Timings> = {
   sweepInterval: 50,
   entryReplyJitterBase: 1, // 测试中应答不抖动
   entryReplyJitterMax: 1,
-  gossipInterval: 150
+  gossipInterval: 150,
+  directedReplyInterval: 10,
+  profileProbeInterval: 20,
+  probeTimeout: 100,
+  legacyProbeTimeout: 250,
+  aliveDedupWindow: 100
 }
 
 const stacks: Stack[] = []
@@ -156,6 +162,22 @@ describe('discovery scanHosts', () => {
 })
 
 describe('discovery 回环集成', () => {
+  it.each([MSG_TYPES.entry, MSG_TYPES.alive, MSG_TYPES.profile])(
+    '%s 收到同版本公司变更后立即通知资料投影，无需改名或发消息', async (type) => {
+      const a = await makeStack('alice')
+      const b = await makeStack('bob')
+      b.discovery.probe('127.0.0.1', a.port)
+      await waitFor(() => a.registry.onlineCount() === 1 && b.registry.onlineCount() === 1)
+      let projected = { ...a.registry.get(b.profile.nodeId)!.profile }
+      a.registry.on('updated', () => { projected = { ...a.registry.get(b.profile.nodeId)!.profile } })
+
+      b.profile.company = '新公司'
+      b.udp.send(makeEnvelope<ProfilePayload>(type, b.profile.nodeId, { profile: b.profile }), '127.0.0.1', a.port)
+      await waitFor(() => projected.company === '新公司')
+      expect(projected).toMatchObject({ nick: 'bob', company: '新公司', profileRev: 1 })
+    }
+  )
+
   it('手动节点互相发现，graceful 退出立刻离线', async () => {
     const a = await makeStack('alice')
     const b = await makeStack('bob', [{ host: '127.0.0.1', port: a.port }])
@@ -273,4 +295,78 @@ describe('discovery 回环集成', () => {
     await sleep(100)
     expect(b.scanRanges).toEqual([])
   })
+})
+
+
+it('回环：首次上线包缺失后仅凭心跳重新握手，关联应答确认同毫秒冲突', async () => {
+  const a = await makeStack('alice'), b = await makeStack('bob')
+  b.udp.send(makeEnvelope(MSG_TYPES.presence, b.profile.nodeId, { seq: 1, profileRev: 1 }), '127.0.0.1', a.port)
+  await waitFor(() => !!a.registry.get(b.profile.nodeId) && !!b.registry.get(a.profile.nodeId))
+  const timestamp = Date.now()
+  b.profile.company = '已更新公司'
+  b.udp.send({ ...makeEnvelope(MSG_TYPES.profile, b.profile.nodeId, { profile: b.profile }), ts: timestamp }, '127.0.0.1', a.port)
+  await waitFor(() => a.registry.get(b.profile.nodeId)?.profile.company === '已更新公司')
+  b.udp.send({ ...makeEnvelope(MSG_TYPES.profile, b.profile.nodeId, { profile: { ...b.profile, company: '延迟旧公司' } }), ts: timestamp }, '127.0.0.1', a.port)
+  await sleep(60)
+  expect(a.registry.get(b.profile.nodeId)?.profile.company).toBe('已更新公司')
+  // 资料版本相同且发送时钟回拨，重新握手应确认当前公司。
+  b.profile.company = '回拨后当前公司'
+  b.udp.send({ ...makeEnvelope(MSG_TYPES.profile, b.profile.nodeId, { profile: b.profile }), ts: timestamp - 5000 }, '127.0.0.1', a.port)
+  await waitFor(() => a.registry.get(b.profile.nodeId)?.profile.company === '回拨后当前公司')
+})
+
+it('回环：快速探活绕过普通发现去重，断开后按探活期限转离线', async () => {
+  const a = await makeStack('alice'), b = await makeStack('bob')
+  a.discovery.probe('127.0.0.1', b.port)
+  await waitFor(() => !!a.registry.get(b.profile.nodeId))
+  a.discovery.probeNode(b.profile.nodeId)
+  await sleep(120)
+  expect(a.registry.get(b.profile.nodeId)?.online).toBe(true)
+  await b.udp.stop()
+  a.discovery.probeNode(b.profile.nodeId)
+  await waitFor(() => a.registry.get(b.profile.nodeId)?.online === false)
+})
+
+it('回环：排队的两轮扫描均送达，gossip 多包按间隔发送', async () => {
+  const a = await makeStack('alice'), b = await makeStack('bob')
+  const received: number[] = [], gossipTimes: number[] = []
+  b.udp.on('envelope', env => {
+    if (env.type === MSG_TYPES.entry) received.push(Date.now())
+    if (env.type === MSG_TYPES.peers) gossipTimes.push(Date.now())
+  })
+  a.discovery.scanHosts(['127.0.0.1', '127.0.0.1'], b.port, 20)
+  a.discovery.scanHosts(['127.0.0.1'], b.port)
+  await waitFor(() => received.length === 3)
+  const records = Array.from({ length: 24 }, (_, i) => ({
+    profile: makeProfile(`extra-${i}`, 1000), ip: '127.0.0.1', udpPort: 9, online: false, lastSeen: Date.now()
+  }))
+  a.registry.seed(records)
+  for (const record of a.registry.values()) record.online = true
+  Reflect.get(a.discovery, 'sendPeersTo').call(a.discovery, b.profile.nodeId)
+  await waitFor(() => gossipTimes.length === 3)
+  expect(gossipTimes[2] - gossipTimes[0]).toBeGreaterThanOrEqual(80)
+})
+
+it('回环：旧客户端忽略关联字段且延迟应答，超过新端 2s 比例窗口仍保留在线', async () => {
+  const a = await makeStack('alice'), b = await makeStack('bob')
+  b.profile.caps = []
+  a.registry.touch(b.profile.nodeId, '127.0.0.1', b.port, b.profile)
+  const originalSend = b.udp.send.bind(b.udp)
+  const delayed: Array<ReturnType<typeof setTimeout>> = []
+  const legacy = vi.spyOn(b.udp, 'send').mockImplementation((env, host, port) => {
+    if (env.type !== MSG_TYPES.alive) return originalSend(env, host, port)
+    // 用比例缩短后的 150ms 模拟旧端正常发现抖动；旧端回包没有 probeId。
+    delayed.push(setTimeout(() => originalSend(makeEnvelope(MSG_TYPES.alive, b.profile.nodeId,
+      { profile: b.profile }), host, port), 150))
+  })
+  try {
+    a.discovery.probeNode(b.profile.nodeId)
+    await sleep(120)
+    expect(a.registry.get(b.profile.nodeId)?.online).toBe(true)
+    await sleep(180)
+    expect(a.registry.get(b.profile.nodeId)?.online).toBe(true)
+  } finally {
+    legacy.mockRestore()
+    delayed.forEach(clearTimeout)
+  }
 })

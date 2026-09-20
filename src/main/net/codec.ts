@@ -141,7 +141,8 @@ function validatePayload(type: string, payload: unknown, textLimit = TEXT_UDP_LI
     case MSG_TYPES.entry:
     case MSG_TYPES.alive:
     case MSG_TYPES.profile: {
-      return isRecord(payload) && validateProfile((payload as Partial<ProfilePayload>).profile)
+      return isRecord(payload) && validateProfile((payload as Partial<ProfilePayload>).profile) &&
+        (payload.probeId === undefined || isStr(payload.probeId, LIMITS.id))
     }
     case MSG_TYPES.presence: {
       if (!isRecord(payload)) return false

@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { isDeepStrictEqual } from 'node:util'
 import type { Profile } from '../../shared/protocol'
 
 const zhCollator = new Intl.Collator('zh-Hans-CN')
@@ -17,6 +18,8 @@ export interface PeerRecord {
  */
 export class PeerRegistry extends EventEmitter {
   private readonly peers = new Map<string, PeerRecord>()
+  private readonly profileTimes = new Map<string, number>()
+  private readonly profileConfirmationOnly = new Set<string>()
 
   constructor(private readonly selfNodeId: string) {
     super()
@@ -35,7 +38,8 @@ export class PeerRegistry extends EventEmitter {
   }
 
   /** 收到对端任意报文时调用；带 profile 的报文（entry/alive/profile）会更新资料 */
-  touch(nodeId: string, ip: string, udpPort: number, profile?: Profile): PeerRecord | null {
+  touch(nodeId: string, ip: string, udpPort: number, profile?: Profile, profileTs?: number,
+    confirmed = false): PeerRecord | null {
     if (nodeId === this.selfNodeId) return null
     if (profile && profile.nodeId !== nodeId) return null
 
@@ -47,6 +51,7 @@ export class PeerRegistry extends EventEmitter {
       if (!profile) return null // 没见过又没带资料的节点，等它的 entry/alive
       const record: PeerRecord = { profile, ip, udpPort, lastSeen: now, online: true }
       this.peers.set(nodeId, record)
+      if (profileTs !== undefined) this.profileTimes.set(nodeId, profileTs)
       this.emit('updated')
       this.emit('online', nodeId) // 新节点即在线：触发补发等待者（messenger）
       return record
@@ -67,11 +72,21 @@ export class PeerRegistry extends EventEmitter {
       changed = true
       cameOnline = true
     }
-    if (profile && profile.profileRev >= existing.profile.profileRev) {
-      if (profile.profileRev > existing.profile.profileRev || profile.nick !== existing.profile.nick) {
+    const newer = profile && profile.profileRev > existing.profile.profileRev
+    const sameRevision = profile && profile.profileRev === existing.profile.profileRev
+    const ordered = profileTs === undefined || !this.profileTimes.has(nodeId) ||
+      profileTs > this.profileTimes.get(nodeId)!
+    if (profile && (newer || (sameRevision && ((ordered && !this.profileConfirmationOnly.has(nodeId)) || confirmed)))) {
+      if (!isDeepStrictEqual(profile, existing.profile)) {
         changed = true
       }
+      if (newer) this.profileConfirmationOnly.delete(nodeId)
+      if (confirmed && sameRevision && profileTs !== undefined && profileTs <= (this.profileTimes.get(nodeId) ?? -Infinity)) {
+        // 发送端时钟回拨后，同版本仅接受关联应答，防旧时钟报文再次覆盖。
+        this.profileConfirmationOnly.add(nodeId)
+      }
       existing.profile = profile
+      if (profileTs !== undefined) this.profileTimes.set(nodeId, profileTs)
     }
     existing.lastSeen = now
 

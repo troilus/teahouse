@@ -1,3 +1,4 @@
+import { RangeScanScheduler } from './services/range-scan'
 import { DiagnosticsService, diagnosticEnvironment } from './services/diagnostics'
 import { setupDiagnosticsUi } from './services/diagnostics-ui'
 import { isLanguage, setLanguage, tr } from '../i18n'
@@ -73,6 +74,7 @@ import {
   DEFAULT_TCP_PORT,
   DEFAULT_UDP_PORT,
   CAPS,
+  DISCOVERY_PROBE_CAP,
   AVATAR_MAX_BYTES,
   AVATAR_MAX_DIMENSION,
   AVATAR_SOURCE_MAX_BYTES,
@@ -80,7 +82,6 @@ import {
   LIMITS,
   MSG_TYPES,
   TABLE_TEXT_LIMIT_BYTES,
-  TIMINGS,
   SHARE_GET_AUTH_TTL,
   SHARE_GET_MAX_PATHS,
   SHARE_PATH_MAX,
@@ -102,9 +103,9 @@ import { DEFAULT_IMAGE_EXTENSION, IMAGE_FILE_EXTENSIONS } from '../shared/media'
 import {
   addSharedScanRanges,
   loadAppState,
-  markScanRangeAutoScanned,
   saveAppSettings,
   saveProfile,
+  saveProfileCaps,
   type AppState
 } from './store/app-state'
 import { refreshTrayLanguage, setupTray, stopTrayUnreadFlash, updateTrayUnread } from './windows/tray'
@@ -269,7 +270,6 @@ if (!gotLock) {
 
   const netState: NetState = { ok: false, udpPort, error: '' }
   const IMAGE_SOURCE_MAX_BYTES = 25 * 1024 * 1024
-  const GLOBAL_SCAN_HOST_DELAY = 8
   const GLOBAL_SCAN_PROGRESS_PUSH_INTERVAL = 200
   const IMAGE_EXTS = new Set<string>(IMAGE_FILE_EXTENSIONS)
   const AVATAR_PICKER_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'bmp']
@@ -311,9 +311,7 @@ if (!gotLock) {
   const remoteView = new RemoteViewWindows(() => mainWindow, () => {
     if (!appState || !remoteView.service) return
     const caps = [...appState.profile.caps.filter(cap => cap !== CAPS.remoteView && cap !== CAPS.remoteShare), ...remoteView.capabilities()]
-    if (caps.join(',') === appState.profile.caps.join(',')) return
-    appState.profile.caps = caps
-    appState.profile.profileRev += 1
+    if (!saveProfileCaps(appState, caps)) return
     discovery?.announceProfile()
   }, async () => {
     diagnostics.record('capture.state', { kind: 'screen', status: 'starting' })
@@ -323,10 +321,9 @@ if (!gotLock) {
   let isQuitting = false
   let nudgeShakeOrigin: [number, number] | null = null
   let nudgeShakeTimers: Array<ReturnType<typeof setTimeout>> = []
-  const rangeScanTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  let rangeScanner: RangeScanScheduler | null = null
   const peersKeyExchanged = new Set<string>() // 已交换过公钥的对端
   let lastLoggedPubKeyCount = -1 // 上次打印「持有公钥的对端数」，用于降噪
-  let globalScanTimer: ReturnType<typeof setTimeout> | null = null
   let globalScanSeq = 0
   let lastGlobalScanProgressPushAt = 0
   let globalScanProgress: ScanProgressView = {
@@ -1181,88 +1178,14 @@ if (!gotLock) {
     )
     if (hosts.length === 0) return globalScanProgress
 
-    let index = 0
-    const tick = (): void => {
-      if (globalScanProgress.scanId !== scanId || !globalScanProgress.running) return
-      const host = hosts[index]
-      if (host && discovery) discovery.probe(host, udpPort)
-      index += 1
-      if (index >= hosts.length) {
-        globalScanTimer = null
-        setGlobalScanProgress(
-          {
-            status: 'done',
-            running: false,
-            done: hosts.length,
-            finishedAt: Date.now()
-          },
-          true
-        )
-        return
-      }
-      setGlobalScanProgress({ done: index })
-      globalScanTimer = setTimeout(tick, GLOBAL_SCAN_HOST_DELAY)
-      globalScanTimer.unref?.()
-    }
-    globalScanTimer = setTimeout(tick, 0)
-    globalScanTimer.unref?.()
+    discovery.scanHosts(hosts, udpPort, 8, {
+      key: 'global',
+      onProgress: (done) => setGlobalScanProgress({ done }),
+      onComplete: () => setGlobalScanProgress({
+        status: 'done', running: false, done: hosts.length, finishedAt: Date.now()
+      }, true)
+    })
     return globalScanProgress
-  }
-
-  function hashString(value: string): number {
-    let hash = 2166136261
-    for (let i = 0; i < value.length; i += 1) {
-      hash ^= value.charCodeAt(i)
-      hash = Math.imul(hash, 16777619)
-    }
-    return hash >>> 0
-  }
-
-  function shouldAutoScanRange(cidr: string): boolean {
-    if (!appState || !registry) return false
-    const onlineCount = registry.onlineCount()
-    if (onlineCount <= TIMINGS.scanRangeAutoScanLargeOnlineThreshold) return true
-    return (
-      hashString(`${appState.nodeId}:${cidr}`) % TIMINGS.scanRangeAutoScanLargeOnlineModulo ===
-      0
-    )
-  }
-
-  function scheduleAutoScanRange(cidr: string): void {
-    const state = appState
-    if (!state || !discovery || rangeScanTimers.has(cidr)) return
-    const meta = state.config.scanRangeSources?.[cidr]
-    if (!meta || meta.source !== 'remote') return
-    const now = Date.now()
-    if (
-      meta.lastAutoScanAt &&
-      now - meta.lastAutoScanAt < TIMINGS.scanRangeAutoScanMinInterval
-    ) {
-      return
-    }
-    if (!shouldAutoScanRange(cidr)) return
-    const delay =
-      TIMINGS.scanRangeAutoScanInitialMin +
-      Math.floor(
-        Math.random() *
-          (TIMINGS.scanRangeAutoScanInitialMax - TIMINGS.scanRangeAutoScanInitialMin + 1)
-      )
-    const timer = setTimeout(() => {
-      rangeScanTimers.delete(cidr)
-      const hosts = parseCidr(cidr)
-      if (!hosts || !discovery || !appState) return
-      discovery.scanHosts(hosts, udpPort, TIMINGS.scanRangeAutoScanHostDelay)
-      markScanRangeAutoScanned(appState, cidr)
-      broadcastSettings()
-    }, delay)
-    rangeScanTimers.set(cidr, timer)
-    timer.unref?.()
-  }
-
-  function scheduleExistingRemoteRangeScans(): void {
-    const c = appState?.config
-    if (!c) return
-    for (const cidr of c.scanRanges) scheduleAutoScanRange(cidr)
   }
 
   function acceptSharedScanRanges(fromNodeId: string, ranges: ScanRangeSummary[]): void {
@@ -1274,7 +1197,7 @@ if (!gotLock) {
       name: sourceName
     })
     if (accepted.length === 0) return
-    for (const cidr of accepted) scheduleAutoScanRange(cidr)
+    rangeScanner?.sync()
     broadcastSettings()
   }
 
@@ -1607,7 +1530,11 @@ if (!gotLock) {
       remoteView.setNetworkReady(tcpReady)
       discovery.start()
       rangeSync?.start()
-      scheduleExistingRemoteRangeScans()
+      rangeScanner = new RangeScanScheduler({
+        discovery, getState: () => appState, onlineCount: () => registry?.onlineCount() ?? 0,
+        udpPort, onUpdated: broadcastSettings
+      })
+      rangeScanner.start()
       netState.ok = true
       diagnostics.record('network.listen', { kind: 'udp', port: udpPort, status: 'ready' })
     } catch (err) {
@@ -2791,14 +2718,7 @@ if (!gotLock) {
         mainWindow?.setTitle(mainWindowTitle())
       }
       if (clean.scanRanges !== undefined) {
-        const nextScanRanges = new Set(clean.scanRanges)
-        for (const cidr of previousScanRanges) {
-          if (!nextScanRanges.has(cidr)) {
-            const timer = rangeScanTimers.get(cidr)
-            if (timer) clearTimeout(timer)
-            rangeScanTimers.delete(cidr)
-          }
-        }
+        rangeScanner?.sync()
         if (clean.scanRanges.some((cidr) => !previousScanRanges.has(cidr))) {
           rangeSync?.scheduleShareSoon()
         }
@@ -2837,7 +2757,7 @@ if (!gotLock) {
     if (!normalized) return -1
     const hosts = parseCidr(normalized)
     if (!hosts) return -1
-    return discovery.scanHosts(hosts, udpPort)
+    return discovery.scanHosts(hosts, udpPort, 8, { key: `manual:${normalized}` })
   })
 
   ipcMain.handle(IpcChannels.netScanAllRanges, (): ScanProgressView => startGlobalRangeScan())
@@ -3301,6 +3221,7 @@ if (!gotLock) {
     void imagePreview.prune()
     const updateCaps = canAdvertiseUpdateSource() ? [CAPS.updateSource] : []
     appState = loadAppState(app.getPath('userData'), app.getVersion(), tcpPort, udpPort, [
+      DISCOVERY_PROBE_CAP,
       CAPS.mediaRecall,
       CAPS.fileDirect,
       CAPS.tableText,
@@ -3432,8 +3353,8 @@ if (!gotLock) {
     stopTrayUnreadFlash(tray)
     rangeSync?.stop()
     rangeSync = null
-    if (globalScanTimer) clearTimeout(globalScanTimer)
-    globalScanTimer = null
+    rangeScanner?.stop()
+    rangeScanner = null
     if (globalScanProgress.running) {
       globalScanProgress = {
         ...globalScanProgress,
@@ -3442,8 +3363,6 @@ if (!gotLock) {
         finishedAt: Date.now()
       }
     }
-    for (const timer of rangeScanTimers.values()) clearTimeout(timer)
-    rangeScanTimers.clear()
     discovery?.stop() // 广播 + 单播 exit，让对端立刻变灰而不是等 90s 超时
     discovery = null
     if (pruneTimer) clearInterval(pruneTimer)

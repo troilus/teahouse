@@ -922,4 +922,14 @@ describe('codec 端到端加密', () => {
     })
     expect(decode(encode(env)).ok).toBe(false)
   })
+
+})
+
+it.each([MSG_TYPES.entry, MSG_TYPES.alive])('%s 校验可选探活关联标识并兼容旧载荷', type => {
+  for (const probeId of [undefined, 'probe-1']) {
+    expect(decode(encode(makeEnvelope(type, 'node-aaaa', { profile: makeProfile(), probeId }))).ok).toBe(true)
+  }
+  for (const probeId of ['', 1, 'x'.repeat(65)]) {
+    expect(decode(encode(makeEnvelope(type, 'node-aaaa', { profile: makeProfile(), probeId }))).ok).toBe(false)
+  }
 })
